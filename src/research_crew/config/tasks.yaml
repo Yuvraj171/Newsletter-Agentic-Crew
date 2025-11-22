@@ -1,0 +1,38 @@
+# tasks.yaml
+research_task:
+  description: >
+    {research_brief}
+  agent: researcher
+  expected_output: >
+    A structured JSON research brief.
+    {research_output_schema}
+
+write_task:
+  description: >
+    {writer_brief}
+  agent: writer
+  context:
+    - research_task
+  expected_output: >
+    A draft article in Markdown, following the structure requested
+    in the brief.
+    {writer_output_schema}
+    Keep total length under ~700 words; prefer concise bullets and avoid long tables.
+
+edit_task:
+  description: >
+    {editor_brief}
+  agent: editor
+  context:
+    - write_task
+  expected_output: >
+    A final, production-ready HTML page with semantic markup
+    and a separate CSS stylesheet for all styling.
+    The HTML must include a <head> with UTF-8 charset, viewport meta,
+    a meaningful <title>, and a <link rel="stylesheet"> to the CSS file.
+    No inline styles; all presentation lives in the CSS.
+    The page should be responsive and accessible (WCAG AA-friendly).
+    Limit CSS to essentials; keep total HTML under ~1,200 words.
+  output_file: outputs/{output_path}.html
+  stylesheet_file: outputs/{output_path}.css
+
