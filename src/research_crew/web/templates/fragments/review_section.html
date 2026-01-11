@@ -1,0 +1,74 @@
+<section class="section" id="review-section">
+  <h2>3. Review & Finalize</h2>
+  <div class="page-grid review-grid">
+    <div>
+      <div class="eyebrow">Preview</div>
+      <div class="preview">
+        {% if not job_id %}
+          <div class="muted">Start a run to view the preview.</div>
+        {% elif not ready %}
+          <div class="skeleton" style="width: 72%;"></div>
+          <div class="skeleton" style="width: 86%;"></div>
+          <div class="skeleton" style="width: 78%;"></div>
+          <div class="skeleton" style="width: 92%;"></div>
+          <div class="skeleton" style="width: 64%;"></div>
+        {% else %}
+          <div class="muted" style="margin-bottom:10px;">Draft ready for review.</div>
+          {% if preview_snippet %}
+            {% set preview_theme %}
+            <style>
+              :root { color-scheme: dark; }
+              body { background: #0c111b; color: #e6edf3; font-family: 'Space Grotesk', 'Inter', system-ui, -apple-system, sans-serif; line-height: 1.6; padding: 18px; }
+              a { color: #5ba2ff; }
+              h1, h2, h3, h4, h5 { color: #e6edf3; }
+              p { margin: 0 0 14px; }
+              table { width: 100%; border-collapse: collapse; }
+              td, th { border: 1px solid #1f2a3c; padding: 8px; }
+            </style>
+            {% endset %}
+            <iframe
+              id="preview-frame"
+              hx-preserve="true"
+              class="preview-frame"
+              srcdoc="{{ preview_theme | replace('\\n', '') | safe }}{{ preview_snippet|e }}"
+              title="Preview"
+            ></iframe>
+          {% else %}
+            <div class="muted">Preview not available.</div>
+          {% endif %}
+          {% if download_url %}
+            <div class="preview-actions">
+              <a href="{{ download_url }}" class="btn btn-primary" style="text-decoration:none;">Download HTML</a>
+            </div>
+          {% endif %}
+        {% endif %}
+      </div>
+    </div>
+    <div class="review-actions">
+      <div class="eyebrow">Action</div>
+      <div class="section" style="padding:14px;">
+        <div class="muted" style="margin-bottom:12px;">Preview is ready. Approve to unlock next steps.</div>
+        <div style="margin-top:14px;">
+          <button
+            class="btn btn-primary"
+            {% if not ready or approved %}disabled{% endif %}
+            {% if job_id %}hx-post="{{ url_for('web.review_approve', job_id=job_id) }}" hx-target="#review-section" hx-swap="outerHTML"{% endif %}
+          >
+            {% if approved %}Approved{% else %}Approve & Unlock{% endif %}
+          </button>
+        </div>
+        {% if error %}
+          <div class="muted" style="color:#e5534b; margin-top:8px;">Error: {{ error }}</div>
+        {% endif %}
+        {% if approved %}
+          <div class="muted" style="color:#2ecc71; margin-top:8px;">Approved.</div>
+        {% endif %}
+        {% if job_id %}
+          <div style="margin-top:12px;">
+            <button class="btn" hx-get="{{ url_for('web.home') }}" hx-target="#app-main" hx-swap="outerHTML">Restart</button>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</section>

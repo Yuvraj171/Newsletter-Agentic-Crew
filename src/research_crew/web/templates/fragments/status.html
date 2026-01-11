@@ -1,0 +1,39 @@
+<section class="section" id="status-section"
+  {% if job_id %}hx-get="{{ url_for('web.status_fragment', job_id=job_id) }}" hx-trigger="{{ 'load, every 3s' if not ready else 'load' }}" hx-swap="outerHTML"{% endif %}
+>
+  <h2>2. AI Specialists are working</h2>
+  {% if not job_id %}
+    <div class="muted">Start a run to see live status.</div>
+  {% else %}
+    <div class="eyebrow">Live progress</div>
+    <div class="progress-wrap">
+      <div class="progress-bar">
+        <span style="width: {{ progress }}%;"></span>
+      </div>
+    </div>
+    <div class="card-row">
+      {% for t in topics %}
+        {% set st = status.get(t.slug) %}
+        {% set state = st.state if st else 'not selected' %}
+        {% set msg = st.message if st else 'Not selected' %}
+        {% set dot_class = 'green' if state in ['active', 'done'] else 'amber' if state == 'queued' else 'gray' %}
+        <div class="agent-card {{ 'active' if state == 'active' else '' }}">
+          <div class="state"><span class="dot {{ dot_class }}"></span><span>{{ state|capitalize }}</span></div>
+          <div class="title">{{ t.label }}</div>
+          <div class="muted">{{ msg }}</div>
+        </div>
+      {% endfor %}
+    </div>
+    <div class="timeline">
+      {% for t in topics %}
+        {% set st = status.get(t.slug) %}
+        {% set state = st.state if st else 'not selected' %}
+        {% set dot_class = 'green' if state in ['active', 'done'] else 'amber' if state == 'queued' else 'gray' %}
+        <span class="dot {{ dot_class }}" title="{{ st.message if st else 'Not selected' }}"></span>
+      {% endfor %}
+    </div>
+    {% if error %}
+      <div class="muted" style="color:#e5534b; margin-top:8px;">Error: {{ error }}</div>
+    {% endif %}
+  {% endif %}
+</section>

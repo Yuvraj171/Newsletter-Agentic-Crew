@@ -1,0 +1,6 @@
+<div id="review-block"
+  {% if job_id %}hx-get="{{ url_for('web.review_fragment', job_id=job_id) }}" hx-trigger="{{ 'every 3s' if not ready else 'none' }}" hx-target="#review-block" hx-swap="outerHTML"{% endif %}
+>
+{% include "fragments/review_section.html" %}
+{% include "fragments/email_section.html" %}
+</div>

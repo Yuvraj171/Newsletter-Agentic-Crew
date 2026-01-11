@@ -1,0 +1,48 @@
+<section class="section" id="step1">
+  <h2>1. Pick sections for this edition</h2>
+  <p class="eyebrow">Tap 'Start' to kick off research & drafting.</p>
+
+  {% if error %}
+    <div class="muted" style="color:#e5534b;">{{ error }}</div>
+  {% endif %}
+
+  <form
+    hx-post="{{ url_for('web.topics_toggle') }}"
+    hx-target="#step1"
+    hx-swap="outerHTML"
+  >
+    <input type="hidden" name="selected" value="{{ selected|join(',') }}">
+    <div class="chips">
+      {% for t in topics %}
+        {% set is_active = t.slug in selected %}
+        <button
+          type="submit"
+          name="toggle"
+          value="{{ t.slug }}"
+          class="chip {{ 'active' if is_active else 'disabled' }} {% if job_id %}disabled{% endif %}"
+          aria-pressed="{{ 'true' if is_active else 'false' }}"
+          {% if job_id %}disabled{% endif %}
+        >
+          {{ t.icon }} {{ t.label }}
+        </button>
+      {% endfor %}
+    </div>
+  </form>
+
+  <form
+    hx-post="{{ url_for('web.run') }}"
+    hx-target="#app-main"
+    hx-swap="outerHTML"
+  >
+    {% for slug in selected %}
+      <input type="hidden" name="selected" value="{{ slug }}">
+    {% endfor %}
+    <input type="hidden" name="selected_csv" value="{{ selected|join(',') }}">
+    <p class="muted">Select at least one section.</p>
+    <div class="cta-sticky">
+      <button class="btn btn-primary" {% if not selected or job_id %}disabled{% endif %}>
+        Start Research & Drafting
+      </button>
+    </div>
+  </form>
+</section>

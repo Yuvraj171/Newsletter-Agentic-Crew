@@ -1,0 +1,70 @@
+{% if job_id %}
+<section class="section" id="email-section" {% if oob %}hx-swap-oob="true"{% endif %}>
+  <h2>4. Email & Send</h2>
+  {% if not ready %}
+    <div class="muted">Finish generation to unlock sending.</div>
+  {% elif not approved %}
+    <div class="muted">Approve the draft above to unlock sending.</div>
+  {% else %}
+    <div class="page-grid" style="grid-template-columns: 1fr;">
+      <div class="section" style="padding:14px;">
+        <div class="eyebrow">Email Delivery</div>
+        <form
+          hx-post="{{ url_for('web.email_send', job_id=job_id) }}"
+          hx-target="#email-section"
+          hx-swap="outerHTML"
+          class="form-grid"
+        >
+          <label class="input-label" for="subject">Subject</label>
+          <input
+            id="subject"
+            name="subject"
+            type="text"
+            class="input"
+            value="{{ email_subject }}"
+            {% if email_sending %}disabled{% endif %}
+          >
+
+          <div class="form-row">
+            <div>
+              <label class="input-label" for="group">Group</label>
+              <select id="group" name="group" class="input" {% if email_sending %}disabled{% endif %}>
+                {% for key, addrs in email_groups.items() %}
+                  <option value="{{ key }}" {% if key == email_group %}selected{% endif %}>
+                    {{ key|capitalize }} ({{ addrs|length }})
+                  </option>
+                {% endfor %}
+              </select>
+              <div class="hint">Resolves to {{ resolved_recipients|length }} recipients.</div>
+            </div>
+            <div>
+              <label class="input-label" for="extra">Additional emails</label>
+              <input
+                id="extra"
+                name="extra_emails"
+                type="text"
+                class="input"
+                placeholder="user@company.com, ..."
+                value="{{ email_extra }}"
+                {% if email_sending %}disabled{% endif %}
+              >
+              <div class="hint">Comma-separated; de-duped with group.</div>
+            </div>
+          </div>
+
+          <div style="margin-top:14px; display:flex; gap:10px; align-items:center;">
+            <button class="btn btn-primary" {% if email_sending %}disabled{% endif %}>
+              {% if email_sending %}Sending...{% elif email_sent %}Resend{% else %}Send Email{% endif %}
+            </button>
+            {% if email_sent %}
+              <div class="muted" style="color:#2ecc71;">Sent to {{ email_sent_to|length }} recipient{{ 's' if email_sent_to|length != 1 else '' }}.</div>
+            {% elif email_error %}
+              <div class="muted" style="color:#e5534b;">{{ email_error }}</div>
+            {% endif %}
+          </div>
+        </form>
+      </div>
+    </div>
+  {% endif %}
+</section>
+{% endif %}

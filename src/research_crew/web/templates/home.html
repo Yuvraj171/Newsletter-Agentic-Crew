@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+  <main id="app-main">
+    <div class="page-grid top-grid">
+      {% include "fragments/topics.html" %}
+      {% include "fragments/status.html" %}
+    </div>
+
+    {% include "fragments/review.html" %}
+  </main>
+{% endblock %}
