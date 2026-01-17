@@ -54,7 +54,7 @@
 
           <div style="margin-top:14px; display:flex; gap:10px; align-items:center;">
             <button class="btn btn-primary" {% if email_sending %}disabled{% endif %}>
-              {% if email_sending %}Sending...{% elif email_sent %}Resend{% else %}Send Email{% endif %}
+              {% if email_sending %}Sending...{% else %}{{ next_send_label }}{% endif %}
             </button>
             {% if email_sent %}
               <div class="muted" style="color:#2ecc71;">Sent to {{ email_sent_to|length }} recipient{{ 's' if email_sent_to|length != 1 else '' }}.</div>
@@ -62,7 +62,30 @@
               <div class="muted" style="color:#e5534b;">{{ email_error }}</div>
             {% endif %}
           </div>
+          <div class="hint">Next send: {{ next_send_hint }}.</div>
         </form>
+        <div class="send-history">
+          <div class="eyebrow">Send history</div>
+          {% if not email_history %}
+            <div class="muted">No send attempts yet.</div>
+          {% else %}
+            <ul class="history-list">
+              {% for attempt in email_history|reverse %}
+                <li class="history-item" title="{{ attempt.recipients|join(', ') }}">
+                  <div class="history-main">
+                    <span class="pill pill-{{ attempt.status }}">{{ attempt.status|capitalize }}</span>
+                    <span class="history-title">{{ attempt.label }}</span>
+                    <span class="muted">{{ attempt.timestamp }}</span>
+                  </div>
+                  <div class="history-meta muted">Subject: {{ attempt.subject }} · Recipients: {{ attempt.recipient_count }}</div>
+                  {% if attempt.error %}
+                    <div class="muted" style="color:#e5534b;">{{ attempt.error }}</div>
+                  {% endif %}
+                </li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </div>
       </div>
     </div>
   {% endif %}

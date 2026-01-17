@@ -16,7 +16,7 @@
         {% set st = status.get(t.slug) %}
         {% set state = st.state if st else 'not selected' %}
         {% set msg = st.message if st else 'Not selected' %}
-        {% set dot_class = 'green' if state in ['active', 'done'] else 'amber' if state == 'queued' else 'gray' %}
+        {% set dot_class = 'green' if state in ['active', 'running', 'done'] else 'amber' if state == 'queued' else 'gray' %}
         <div class="agent-card {{ 'active' if state == 'active' else '' }}">
           <div class="state"><span class="dot {{ dot_class }}"></span><span>{{ state|capitalize }}</span></div>
           <div class="title">{{ t.label }}</div>
@@ -28,7 +28,7 @@
       {% for t in topics %}
         {% set st = status.get(t.slug) %}
         {% set state = st.state if st else 'not selected' %}
-        {% set dot_class = 'green' if state in ['active', 'done'] else 'amber' if state == 'queued' else 'gray' %}
+        {% set dot_class = 'green' if state in ['active', 'running', 'done'] else 'amber' if state == 'queued' else 'gray' %}
         <span class="dot {{ dot_class }}" title="{{ st.message if st else 'Not selected' }}"></span>
       {% endfor %}
     </div>

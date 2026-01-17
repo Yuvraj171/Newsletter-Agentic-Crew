@@ -1,4 +1,5 @@
 ﻿from flask import Blueprint, render_template, request, send_file, abort, url_for
+import json
 import time
 from pathlib import Path
 import threading
@@ -24,6 +25,10 @@ EMAIL_GROUPS = {
 
 # In-memory job store: resets on restart.
 JOBS = {}
+RUNTIME_PATH = Path("instance") / "memory" / "topic_runtimes.json"
+RUNTIME_LOCK = threading.Lock()
+RUNTIME_CACHE = {}
+RUNTIME_LOADED = False
 
 
 def canonicalize_slug(slug: str | None) -> str:
@@ -59,16 +64,78 @@ def default_subject():
     return f"BEST Group Tech Newsletter - {month}"
 
 
-def percent_complete(status):
-    total = len(status)
-    done = sum(1 for s in status.values() if s.get("state") == "done")
-    active = sum(1 for s in status.values() if s.get("state") == "active")
-    return int(((done + 0.5 * active) / total) * 100) if total else 0
+def now_timestamp():
+    return time.strftime("%Y-%m-%d %H:%M")
 
+def load_runtime_cache():
+    global RUNTIME_LOADED
+    if RUNTIME_LOADED:
+        return
+    RUNTIME_LOADED = True
+    if not RUNTIME_PATH.exists():
+        return
+    try:
+        payload = json.loads(RUNTIME_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if isinstance(key, str) and isinstance(value, list):
+                durations = [float(v) for v in value if isinstance(v, (int, float))]
+                if durations:
+                    RUNTIME_CACHE[key] = durations
+
+def runtime_snapshot():
+    with RUNTIME_LOCK:
+        load_runtime_cache()
+        return {k: list(v) for k, v in RUNTIME_CACHE.items()}
+
+def update_runtime_cache(slug, duration, max_samples=5):
+    if duration <= 0:
+        return
+    with RUNTIME_LOCK:
+        load_runtime_cache()
+        durations = RUNTIME_CACHE.get(slug, [])
+        durations.append(duration)
+        if len(durations) > max_samples:
+            durations = durations[-max_samples:]
+        RUNTIME_CACHE[slug] = durations
+        RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+        RUNTIME_PATH.write_text(json.dumps(RUNTIME_CACHE, indent=2), encoding="utf-8")
+
+
+def percent_complete(status):
+    if not status:
+        return 0
+    now = time.time()
+    stats = runtime_snapshot()
+    per_topic = []
+    for slug, entry in status.items():
+        durations = stats.get(slug, [])
+        expected = sum(durations) / len(durations) if durations else None
+        per_topic.append(topic_progress(entry, now, expected))
+    return int(sum(per_topic) / len(per_topic)) if per_topic else 0
 
 def all_done(status):
     return all(s.get("state") == "done" for s in status.values()) if status else False
 
+
+def topic_progress(entry, now, expected_duration):
+    state = entry.get("state")
+    if state in {"done", "failed", "missing"}:
+        return 100
+    if state in {"active", "running"}:
+        started_at = entry.get("started_at") or now
+        elapsed = max(0.0, now - started_at)
+        base = 5
+        cap = 90
+        if expected_duration and expected_duration > 0:
+            ratio = min(elapsed / expected_duration, 1.0)
+            return int(base + (cap - base) * ratio)
+        ramp_seconds = 120
+        ratio = min(elapsed / ramp_seconds, 1.0)
+        return int(base + (cap - base) * ratio)
+    return 0
 
 def job_is_ready(job):
     status = job.get("status", {})
@@ -120,6 +187,31 @@ def build_notice(job):
     return {"notice": "Run started. Preparing tasks...", "notice_level": "info"}
 
 
+def next_send_label(history):
+    return "Send Email" if not history else "Resend Email"
+
+
+def next_send_hint(history):
+    return "First send" if not history else "Resend"
+
+
+def add_send_history(job, status, recipients, subject, error=None):
+    history = job.setdefault("email_history", [])
+    attempt = len(history) + 1
+    entry = {
+        "attempt": attempt,
+        "label": "First send" if attempt == 1 else "Resend",
+        "status": status,
+        "timestamp": now_timestamp(),
+        "recipient_count": len(recipients or []),
+        "recipients": recipients or [],
+        "subject": subject,
+        "error": error,
+    }
+    history.append(entry)
+    return entry
+
+
 def init_job(selected_slugs):
     job_id = uuid.uuid4().hex
     status = {slug: {"state": "queued", "message": "Queued", "started_at": None} for slug in selected_slugs}
@@ -137,6 +229,7 @@ def init_job(selected_slugs):
         "email_sent_to": [],
         "email_group": "all",
         "email_extra": "",
+        "email_history": [],
     }
     return job_id
 
@@ -154,8 +247,12 @@ def run_job(job_id):
         else:
             st["state"] = state
             st["message"] = detail
-            if st["started_at"] is None and state in {"active", "done"}:
+            if st["started_at"] is None and state in {"active", "running", "done"}:
                 st["started_at"] = time.time()
+            if state == "done" and st.get("ended_at") is None:
+                st["ended_at"] = time.time()
+                duration = st["ended_at"] - (st.get("started_at") or st["ended_at"])
+                update_runtime_cache(slug, duration)
 
     def log_cb(msg):
         # TODO: store logs per job if needed
@@ -209,6 +306,9 @@ def build_review_context(job_id, *, include_preview=True):
 
     topics_selected = [t for t in TOPICS if t["slug"] in job["selected"]]
     notice_ctx = build_notice(job)
+    email_history = job.get("email_history", [])
+    next_label = next_send_label(email_history)
+    next_hint = next_send_hint(email_history)
     return {
         "job_id": job_id,
         "topics": topics_selected,
@@ -230,6 +330,9 @@ def build_review_context(job_id, *, include_preview=True):
         "download_url": download_url,
         "preview_url": preview_url,
         "oob": False,
+        "email_history": email_history,
+        "next_send_label": next_label,
+        "next_send_hint": next_hint,
         **notice_ctx,
     }
 
@@ -370,6 +473,7 @@ def email_send(job_id):
     if not recipients:
         job["email_error"] = "No recipients selected."
         job["email_sending"] = False
+        add_send_history(job, "blocked", recipients, subject, error=job["email_error"])
         ctx = build_review_context(job_id, include_preview=False)
         ctx["notice_oob"] = True
         return render_template("fragments/email_section.html", **ctx)
@@ -379,8 +483,10 @@ def email_send(job_id):
         send_newsletter_email(recipients, subject, html)
         job["email_sent"] = True
         job["email_sent_to"] = recipients
+        add_send_history(job, "success", recipients, subject)
     except Exception as e:
         job["email_error"] = str(e)
+        add_send_history(job, "failed", recipients, subject, error=job["email_error"])
     finally:
         job["email_sending"] = False
 
