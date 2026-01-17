@@ -70,6 +70,56 @@ def all_done(status):
     return all(s.get("state") == "done" for s in status.values()) if status else False
 
 
+def job_is_ready(job):
+    status = job.get("status", {})
+    path = job.get("output_path")
+    html_ready = job.get("html_ready") and path and Path(path).exists()
+    return bool(html_ready and job.get("error") is None and all_done(status))
+
+
+def build_notice(job):
+    if not job:
+        return {"notice": "Pick sections to start a run.", "notice_level": "info"}
+
+    status = job.get("status", {})
+    ready = job_is_ready(job)
+    progress = percent_complete(status)
+    error = job.get("error")
+    if error:
+        return {"notice": f"Generation failed: {error}", "notice_level": "danger"}
+
+    if job.get("email_sending"):
+        return {"notice": "Sending email...", "notice_level": "info"}
+
+    email_error = job.get("email_error")
+    if email_error:
+        warn_errors = {"No recipients selected.", "Draft is not ready or not approved."}
+        level = "warning" if email_error in warn_errors else "danger"
+        return {"notice": f"Email error: {email_error}", "notice_level": level}
+
+    if job.get("email_sent"):
+        sent_to = job.get("email_sent_to", [])
+        count = len(sent_to)
+        label = "recipient" if count == 1 else "recipients"
+        return {"notice": f"Email sent to {count} {label}.", "notice_level": "success"}
+
+    if ready and job.get("approved"):
+        recipients = resolve_recipients(job.get("email_group", "all"), job.get("email_extra", ""))
+        count = len(recipients)
+        if count == 0:
+            return {"notice": "Draft approved. Add recipients to send.", "notice_level": "warning"}
+        label = "recipient" if count == 1 else "recipients"
+        return {"notice": f"Draft approved. Ready to send to {count} {label}.", "notice_level": "success"}
+
+    if ready:
+        return {"notice": "Draft ready. Review and approve to unlock email.", "notice_level": "success"}
+
+    if status:
+        return {"notice": f"Research in progress ({progress}% complete).", "notice_level": "info"}
+
+    return {"notice": "Run started. Preparing tasks...", "notice_level": "info"}
+
+
 def init_job(selected_slugs):
     job_id = uuid.uuid4().hex
     status = {slug: {"state": "queued", "message": "Queued", "started_at": None} for slug in selected_slugs}
@@ -158,6 +208,7 @@ def build_review_context(job_id, *, include_preview=True):
             preview_snippet = ""
 
     topics_selected = [t for t in TOPICS if t["slug"] in job["selected"]]
+    notice_ctx = build_notice(job)
     return {
         "job_id": job_id,
         "topics": topics_selected,
@@ -179,11 +230,13 @@ def build_review_context(job_id, *, include_preview=True):
         "download_url": download_url,
         "preview_url": preview_url,
         "oob": False,
+        **notice_ctx,
     }
 
 
 @bp.route("/")
 def home():
+    notice_ctx = build_notice(None)
     return render_template(
         "home.html",
         topics=TOPICS,
@@ -194,6 +247,7 @@ def home():
         ready=False,
         error=None,
         review_confirmed=False,
+        **notice_ctx,
     )
 
 
@@ -227,6 +281,7 @@ def run():
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
 
     job = JOBS[job_id]
+    notice_ctx = build_notice(job)
     return render_template(
         "home.html",
         topics=TOPICS,
@@ -237,6 +292,7 @@ def run():
         ready=False,
         error=None,
         review_confirmed=False,
+        **notice_ctx,
     )
 
 
@@ -244,9 +300,10 @@ def run():
 def status_fragment(job_id):
     job = get_job_or_404(job_id)
     status = job["status"]
-    ready = job["html_ready"] and job["error"] is None and all_done(status)
+    ready = job_is_ready(job)
     progress = percent_complete(status)
     topics_selected = [t for t in TOPICS if t["slug"] in job["selected"]]
+    notice_ctx = build_notice(job)
     return render_template(
         "fragments/status.html",
         topics=topics_selected,
@@ -255,6 +312,8 @@ def status_fragment(job_id):
         ready=ready,
         job_id=job_id,
         error=job["error"],
+        notice_oob=True,
+        **notice_ctx,
     )
 
 
@@ -277,7 +336,9 @@ def review_approve(job_id):
     # Placeholder side effect: mark approved; hook real send/publish here using job["output_path"]
     job["approved"] = True
     job["review_confirmed"] = False
+    job["email_error"] = None
     ctx = build_review_context(job_id)
+    ctx["notice_oob"] = True
     review_html = render_template("fragments/review_section.html", **ctx)
     email_html = render_template("fragments/email_section.html", **{**ctx, "oob": True})
     return review_html + email_html
@@ -286,11 +347,11 @@ def review_approve(job_id):
 @bp.route("/email/<job_id>", methods=["POST"])
 def email_send(job_id):
     job = get_job_or_404(job_id)
-    html_ready = job["html_ready"] and job.get("output_path") and Path(job["output_path"]).exists()
-    ready = html_ready and job["error"] is None and all_done(job["status"])
+    ready = job_is_ready(job)
     if not ready or not job.get("approved"):
         job["email_error"] = "Draft is not ready or not approved."
         ctx = build_review_context(job_id, include_preview=False)
+        ctx["notice_oob"] = True
         return render_template("fragments/email_section.html", **ctx)
 
     group = request.form.get("group", job.get("email_group", "all"))
@@ -309,7 +370,9 @@ def email_send(job_id):
     if not recipients:
         job["email_error"] = "No recipients selected."
         job["email_sending"] = False
-        return review_fragment(job_id)
+        ctx = build_review_context(job_id, include_preview=False)
+        ctx["notice_oob"] = True
+        return render_template("fragments/email_section.html", **ctx)
 
     try:
         html = Path(job["output_path"]).read_text(encoding="utf-8")
@@ -322,6 +385,7 @@ def email_send(job_id):
         job["email_sending"] = False
 
     ctx = build_review_context(job_id, include_preview=False)
+    ctx["notice_oob"] = True
     return render_template("fragments/email_section.html", **ctx)
 
 

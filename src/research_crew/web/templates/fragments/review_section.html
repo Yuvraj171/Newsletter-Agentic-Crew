@@ -47,7 +47,17 @@
     <div class="review-actions">
       <div class="eyebrow">Action</div>
       <div class="section" style="padding:14px;">
-        <div class="muted" style="margin-bottom:12px;">Preview is ready. Approve to unlock next steps.</div>
+        {% if not job_id %}
+          <div class="muted" style="margin-bottom:12px;">Start a run to unlock review actions.</div>
+        {% elif error %}
+          <div class="muted" style="margin-bottom:12px; color:#e5534b;">Generation failed. Restart to try again.</div>
+        {% elif not ready %}
+          <div class="muted" style="margin-bottom:12px;">Waiting on generation to finish.</div>
+        {% elif approved %}
+          <div class="muted" style="margin-bottom:12px; color:#2ecc71;">Approved. Email sending is unlocked.</div>
+        {% else %}
+          <div class="muted" style="margin-bottom:12px;">Preview is ready. Approve to unlock email.</div>
+        {% endif %}
         <div style="margin-top:14px;">
           <button
             class="btn btn-primary"

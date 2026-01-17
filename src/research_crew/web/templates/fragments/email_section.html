@@ -66,5 +66,8 @@
       </div>
     </div>
   {% endif %}
+  {% if notice_oob %}
+    {% include "fragments/notice.html" %}
+  {% endif %}
 </section>
 {% endif %}

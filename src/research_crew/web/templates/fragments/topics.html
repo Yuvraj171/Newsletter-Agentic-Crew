@@ -19,7 +19,7 @@
           type="submit"
           name="toggle"
           value="{{ t.slug }}"
-          class="chip {{ 'active' if is_active else 'disabled' }} {% if job_id %}disabled{% endif %}"
+          class="chip{% if is_active %} active{% endif %}{% if job_id %} disabled{% endif %}"
           aria-pressed="{{ 'true' if is_active else 'false' }}"
           {% if job_id %}disabled{% endif %}
         >

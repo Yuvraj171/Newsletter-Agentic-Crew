@@ -36,4 +36,7 @@
       <div class="muted" style="color:#e5534b; margin-top:8px;">Error: {{ error }}</div>
     {% endif %}
   {% endif %}
+  {% if notice_oob %}
+    {% include "fragments/notice.html" %}
+  {% endif %}
 </section>

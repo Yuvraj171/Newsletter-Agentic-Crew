@@ -16,62 +16,85 @@
   <ul>
   <li><code>Ctrl + C</code>: Copy</li>
   <li><code>Ctrl + V</code>: Paste</li>
-  <li><code>Ctrl + A</code>: Select All</li>
-  <li><code>Alt + Tab</code>: Switch Windows</li>
-  <li><code>Windows Key + D</code>: Show/Hide Desktop</li>
-  <li><code>Windows Key + L</code>: Lock PC</li>
+  <li><code>Ctrl + A</code>: Select all</li>
+  <li><code>Alt + Tab</code>: Switch apps</li>
+  <li><code>Windows Key + D</code>: Show desktop</li>
   <li><code>Ctrl + Shift + Esc</code>: Open Task Manager</li>
+  <li><code>Windows Key + Shift + S</code>: Open Snipping Tool</li>
   </ul>
  
 
   <h1>Top Time-Saving Mac Shortcuts</h1>
   <ul>
-  <li><code>Cmd + C</code>: Copy</li>
-  <li><code>Cmd + V</code>: Paste</li>
-  <li><code>Cmd + A</code>: Select All</li>
-  <li><code>Cmd + Tab</code>: Switch Apps</li>
-  <li><code>Cmd + Spacebar</code>: Spotlight Search</li>
-  <li><code>Cmd + W</code>: Close Window</li>
-  <li><code>Cmd + Option + Esc</code>: Force Quit</li>
+  <li><code>Command + C</code>: Copy</li>
+  <li><code>Command + V</code>: Paste</li>
+  <li><code>Command + A</code>: Select all</li>
+  <li><code>Command + Tab</code>: Switch apps</li>
+  <li><code>Command + Spacebar</code>: Open Spotlight Search</li>
+  <li><code>Command + Option + Spacebar</code>: Open Finder search</li>
+  <li><code>Command + Shift + T</code>: Reopen last tab</li>
   </ul>
  
 
   <h1>Quick Fixes for Everyday Tech Headaches</h1>
+  
+  <section>
+  <h3>Slow Wi-Fi:</h3>
+  <ul>
+  <li>Restart router and computer.</li>
+  <li>Check Wi-Fi signal strength.</li>
+  <li>Update network drivers (Windows) / Renew DHCP Lease (Mac).</li>
+  </ul>
+  </section>
  
 
-  <h2>Slow Wi-Fi</h2>
+  <section>
+  <h3>Printer not connecting:</h3>
   <ul>
-  <li><strong>Windows:</strong> Restart router and computer. Check Wi-Fi signal. Update network drivers.</li>
-  <li><strong>Mac:</strong> Restart router and computer. Check Wi-Fi signal. Renew DHCP Lease (System Preferences > Network > Wi-Fi > Advanced > TCP/IP).</li>
+  <li>Check cable connection.</li>
+  <li>Restart printer and computer.</li>
+  <li>Update printer drivers (Windows) / Add printer in System Preferences (Mac).</li>
   </ul>
+  </section>
  
 
-  <h2>Printer Not Connecting</h2>
+  <section>
+  <h3>Application frozen:</h3>
   <ul>
-  <li><strong>Windows:</strong> Check cable. Restart printer and computer. Update drivers.</li>
-  <li><strong>Mac:</strong> Check cable. Restart printer and computer. Re-add printer (System Preferences > Printers & Scanners).</li>
+  <li>Press <code>Ctrl + Shift + Esc</code> (Windows) / <code>Command + Option + Esc</code> (Mac).</li>
+  <li>Select the app and click 'End Task' (Windows) / 'Force Quit' (Mac).</li>
   </ul>
+  </section>
  
 
-  <h2>Application Frozen</h2>
+  <section>
+  <h3>Computer running slow:</h3>
   <ul>
-  <li><strong>Windows:</strong> Press Ctrl+Shift+Esc, select app, and click 'End Task'.</li>
-  <li><strong>Mac:</strong> Press Cmd+Option+Esc, select app, and click 'Force Quit'.</li>
+  <li>Close unnecessary programs.</li>
+  <li>Run Disk Cleanup (Windows) / Disk Utility (Mac).</li>
+  <li>Defragment hard drive (Windows, if not SSD) / Check Activity Monitor (Mac).</li>
   </ul>
+  </section>
  
 
-  <h2>Computer Running Slow</h2>
+  <section>
+  <h3>Web browser not responding:</h3>
   <ul>
-  <li><strong>Windows:</strong> Close unused programs. Run Disk Cleanup. Defragment HDD (if not SSD).</li>
-  <li><strong>Mac:</strong> Close unused programs. Run Disk Utility to repair permissions. Check Activity Monitor.</li>
+  <li>Close extra tabs.</li>
+  <li>Clear cache and cookies.</li>
+  <li>Reset browser settings.</li>
   </ul>
+  </section>
  
 
-  <h2>Web Browser Not Responding</h2>
+  <section>
+  <h3>Bluetooth device not connecting:</h3>
   <ul>
-  <li><strong>Windows:</strong> Close tabs or restart browser. Clear cache and cookies.</li>
-  <li><strong>Mac:</strong> Close tabs or restart browser. Clear cache and cookies.</li>
+  <li>Ensure Bluetooth is on.</li>
+  <li>Restart computer and device.</li>
+  <li>Re-pair the device.</li>
   </ul>
+  </section>
  
 
   <h1>Pro-Tips</h1>
@@ -79,7 +102,7 @@
   <li>Restart your computer weekly.</li>
   <li>Use a password manager.</li>
   <li>Clear browser cache and cookies regularly.</li>
-  <li>Take breaks from your screen hourly.</li>
+  <li>Take breaks from your screen every hour.</li>
   </ul>
   </div>
  </body>
@@ -114,7 +137,7 @@
  }
  
 
- h2 {
+ h3 {
   color: #0056b3;
   margin-top: 15px;
  }
@@ -145,6 +168,14 @@
  }
  
 
+ section {
+  margin-bottom: 20px;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 5px;
+ }
+ 
+
  /* Basic responsive design */
  @media (max-width: 600px) {
   .container {
@@ -152,9 +183,6 @@
   }
   h1 {
   font-size: 1.5em;
-  }
-  ul {
-  padding-left: 15px;
   }
  }
  ```
