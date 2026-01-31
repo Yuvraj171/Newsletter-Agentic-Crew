@@ -11,16 +11,29 @@
         <span style="width: {{ progress }}%;"></span>
       </div>
     </div>
+    <div class="progress-meta muted">
+      {% if eta_range %}
+        ETA: {{ eta_range }}
+      {% else %}
+        ETA: learning...
+      {% endif %}
+    </div>
     <div class="card-row">
       {% for t in topics %}
         {% set st = status.get(t.slug) %}
         {% set state = st.state if st else 'not selected' %}
         {% set msg = st.message if st else 'Not selected' %}
         {% set dot_class = 'green' if state in ['active', 'running', 'done'] else 'amber' if state == 'queued' else 'gray' %}
+        {% set eta = eta_by_slug.get(t.slug) if eta_by_slug is defined else None %}
         <div class="agent-card {{ 'active' if state == 'active' else '' }}">
           <div class="state"><span class="dot {{ dot_class }}"></span><span>{{ state|capitalize }}</span></div>
           <div class="title">{{ t.label }}</div>
           <div class="muted">{{ msg }}</div>
+          {% if eta %}
+            <div class="muted">ETA: {{ eta }}</div>
+          {% elif state in ['queued', 'active', 'running'] %}
+            <div class="muted">ETA: learning...</div>
+          {% endif %}
         </div>
       {% endfor %}
     </div>

@@ -28,6 +28,13 @@ body {
   margin: 0 auto;
   padding: 24px 20px 48px;
 }
+.page-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
 .page-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
@@ -189,6 +196,10 @@ body {
   background: linear-gradient(90deg, var(--primary), #5ba2ff);
   transition: width 0.6s ease;
 }
+.progress-meta {
+  margin: 6px 0 12px;
+  font-size: 13px;
+}
 .timeline {
   display: flex;
   gap: 18px;
@@ -238,6 +249,30 @@ body {
 .input-label { display: block; font-weight: 600; margin: 4px 0 6px; color: var(--muted); }
 .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap: 10px; margin-top: 8px; }
 .form-grid { display: flex; flex-direction: column; gap: 10px; }
+.email-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.email-summary {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: rgba(255,255,255,0.03);
+  display: grid;
+  gap: 8px;
+}
+.summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+.summary-label { color: var(--muted); font-weight: 600; }
+.summary-warning { color: var(--amber); font-size: 13px; }
 .send-history {
   margin-top: 16px;
   padding-top: 12px;

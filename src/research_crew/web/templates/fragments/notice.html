@@ -1,9 +1,11 @@
-<div
-  id="notice-banner"
-  class="notice notice-{{ notice_level }}"
-  role="status"
-  aria-live="polite"
-  {% if notice_oob %}hx-swap-oob="true"{% endif %}
->
-  {{ notice }}
-</div>
+{% if notice %}
+  <div
+    id="notice-banner"
+    class="notice notice-{{ notice_level }}"
+    role="status"
+    aria-live="polite"
+    {% if notice_oob %}hx-swap-oob="true"{% endif %}
+  >
+    {{ notice }}
+  </div>
+{% endif %}

@@ -15,6 +15,7 @@
           hx-swap="outerHTML"
           class="form-grid"
         >
+          {% set send_label = next_send_label %}
           <label class="input-label" for="subject">Subject</label>
           <input
             id="subject"
@@ -52,9 +53,70 @@
             </div>
           </div>
 
-          <div style="margin-top:14px; display:flex; gap:10px; align-items:center;">
-            <button class="btn btn-primary" {% if email_sending %}disabled{% endif %}>
-              {% if email_sending %}Sending...{% else %}{{ next_send_label }}{% endif %}
+          {% if email_preview %}
+            <div class="email-summary">
+              <div class="summary-row">
+                <span class="summary-label">Subject</span>
+                <span>{{ email_preview.subject }}</span>
+              </div>
+              <div class="summary-row">
+                <span class="summary-label">Recipients</span>
+                {% if email_preview.recipients %}
+                  <span>{{ email_preview.recipient_count }}: {{ email_preview.recipients|join(', ') }}</span>
+                {% else %}
+                  <span>None</span>
+                {% endif %}
+              </div>
+              {% if email_preview.content_hash %}
+                <div class="summary-row">
+                  <span class="summary-label">Content hash</span>
+                  <span>{{ email_preview.content_hash[:12] }}</span>
+                </div>
+              {% endif %}
+              {% if email_preview.timestamp %}
+                <div class="summary-row">
+                  <span class="summary-label">Previewed</span>
+                  <span>{{ email_preview.timestamp }}</span>
+                </div>
+              {% endif %}
+            </div>
+            {% if email_preview.duplicate %}
+              <div class="summary-warning">
+                Duplicate content detected from {{ email_preview.duplicate.timestamp }}
+                (attempt {{ email_preview.duplicate.attempt }}, subject {{ email_preview.duplicate.subject }}).
+              </div>
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  name="allow_duplicate"
+                  value="on"
+                  {% if email_preview.allow_duplicate %}checked{% endif %}
+                  {% if email_sending %}disabled{% endif %}
+                >
+                Allow duplicate send
+              </label>
+            {% endif %}
+          {% else %}
+            <div class="hint">Preview summary to confirm recipients and duplicate checks.</div>
+          {% endif %}
+
+          <label class="toggle-row">
+            <input
+              type="checkbox"
+              name="confirm_send"
+              value="on"
+              {% if email_preview and email_preview.confirm_send %}checked{% endif %}
+              {% if email_sending %}disabled{% endif %}
+            >
+            I confirm the recipients above and want to send.
+          </label>
+
+          <div class="email-actions">
+            <button class="btn" name="action" value="preview" {% if email_sending %}disabled{% endif %}>
+              Preview Summary
+            </button>
+            <button class="btn btn-primary" name="action" value="send" {% if email_sending %}disabled{% endif %}>
+              {% if email_sending %}Sending...{% else %}{{ send_label }}{% endif %}
             </button>
             {% if email_sent %}
               <div class="muted" style="color:#2ecc71;">Sent to {{ email_sent_to|length }} recipient{{ 's' if email_sent_to|length != 1 else '' }}.</div>
@@ -77,7 +139,7 @@
                     <span class="history-title">{{ attempt.label }}</span>
                     <span class="muted">{{ attempt.timestamp }}</span>
                   </div>
-                  <div class="history-meta muted">Subject: {{ attempt.subject }} · Recipients: {{ attempt.recipient_count }}</div>
+                  <div class="history-meta muted">Subject: {{ attempt.subject }} | Recipients: {{ attempt.recipient_count }}</div>
                   {% if attempt.error %}
                     <div class="muted" style="color:#e5534b;">{{ attempt.error }}</div>
                   {% endif %}

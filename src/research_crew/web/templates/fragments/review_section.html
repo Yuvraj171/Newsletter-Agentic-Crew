@@ -73,11 +73,6 @@
         {% if approved %}
           <div class="muted" style="color:#2ecc71; margin-top:8px;">Approved.</div>
         {% endif %}
-        {% if job_id %}
-          <div style="margin-top:12px;">
-            <button class="btn" hx-get="{{ url_for('web.home') }}" hx-target="#app-main" hx-swap="outerHTML">Restart</button>
-          </div>
-        {% endif %}
       </div>
     </div>
   </div>

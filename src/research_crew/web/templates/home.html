@@ -1,6 +1,16 @@
 {% extends "base.html" %}
 {% block content %}
   <main id="app-main">
+    <div class="page-actions">
+      <button
+        class="btn"
+        hx-get="{{ url_for('web.home', reset=1) }}"
+        hx-target="#app-main"
+        hx-swap="outerHTML"
+      >
+        Restart
+      </button>
+    </div>
     {% include "fragments/notice.html" %}
     <div class="page-grid top-grid">
       {% include "fragments/topics.html" %}
