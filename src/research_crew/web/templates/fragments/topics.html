@@ -38,6 +38,17 @@
       <input type="hidden" name="selected" value="{{ slug }}">
     {% endfor %}
     <input type="hidden" name="selected_csv" value="{{ selected|join(',') }}">
+    <label class="input-label" for="search_queries">Search context (optional)</label>
+    <input
+      id="search_queries"
+      name="search_queries"
+      type="text"
+      class="input"
+      placeholder="copilot pricing, digital twin use cases"
+      value="{{ search_queries_text or '' }}"
+      {% if job_id %}disabled{% endif %}
+    >
+    <div class="hint">Saved as verbatim search queries in episode memory.</div>
     <p class="muted">Select at least one section.</p>
     <div class="cta-sticky">
       <button class="btn btn-primary" {% if not selected or job_id %}disabled{% endif %}>

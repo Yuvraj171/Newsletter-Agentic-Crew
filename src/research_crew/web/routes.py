@@ -10,6 +10,7 @@ import uuid
 
 from research_crew.app import generate_newsletter, send_newsletter_email
 from research_crew.web.db import load_job, load_latest_job, save_email_history_entry, save_job, find_duplicate_send
+from research_crew.memory.episodes import create_episode, finish_episode, build_job_metrics, find_running_episode_id
 
 bp = Blueprint("web", __name__)
 
@@ -37,6 +38,7 @@ WORK_QUEUE = queue.Queue()
 WORKER_LOCK = threading.Lock()
 WORKER_STARTED = False
 APP_START_TS = time.time()
+MAX_JOB_RUNTIME_SECONDS = 45 * 60
 
 
 def canonicalize_slug(slug: str | None) -> str:
@@ -48,6 +50,19 @@ def parse_selected(selected_csv: str):
     parts = (selected_csv or "").split(",")
     normalized = [canonicalize_slug(p) for p in parts]
     return [slug for slug in normalized if slug in TOPIC_SLUGS]
+
+
+def parse_search_queries(raw_text: str):
+    text = (raw_text or "").replace("\r", "\n").strip()
+    if not text:
+        return []
+    queries = []
+    for line in text.split("\n"):
+        for part in line.split(","):
+            query = part.strip()
+            if query:
+                queries.append(query)
+    return queries
 
 
 def parse_emails(csv: str):
@@ -72,8 +87,25 @@ def default_subject():
     return f"BEST Group Tech Newsletter - {month}"
 
 
+def normalize_subject(value):
+    text = value.strip() if isinstance(value, str) else ""
+    if not text or text.lower() in {"none", "null"}:
+        return default_subject()
+    return text
+
+
 def now_timestamp():
     return time.strftime("%Y-%m-%d %H:%M")
+
+
+def build_run_config(selected_slugs, search_queries):
+    return {
+        "entrypoint": "web_ui",
+        "selected_topics": list(selected_slugs or []),
+        "topic_count": len(selected_slugs or []),
+        "search_query_count": len(search_queries or []),
+    }
+
 
 def normalize_html(html):
     return " ".join((html or "").split())
@@ -220,6 +252,47 @@ def job_is_ready(job):
     return bool(html_ready and job.get("error") is None and all_done(status))
 
 
+def maybe_abort_stalled_job(job):
+    status = job.get("status", {})
+    if not status or job.get("error") or job_is_ready(job):
+        return False
+
+    now = time.time()
+    started_values = []
+    for entry in status.values():
+        state = (entry or {}).get("state")
+        if state in {"queued", "active", "running", "waiting"}:
+            started_values.append((entry or {}).get("started_at") or now)
+
+    if not started_values:
+        return False
+
+    oldest_started = min(started_values)
+    if (now - oldest_started) < MAX_JOB_RUNTIME_SECONDS:
+        return False
+
+    reason = f"Run exceeded {MAX_JOB_RUNTIME_SECONDS // 60} minutes; marked as aborted."
+    job["error"] = reason
+    for entry in status.values():
+        state = (entry or {}).get("state")
+        if state in {"queued", "active", "running", "waiting"}:
+            entry["state"] = "failed"
+            entry["message"] = "Aborted: runtime threshold exceeded."
+            if entry.get("ended_at") is None:
+                entry["ended_at"] = now
+    save_job(job)
+
+    episode_id = job.get("episode_id") or find_running_episode_id(job.get("job_id"))
+    if episode_id:
+        finish_episode(
+            episode_id,
+            "aborted",
+            error=reason,
+            metrics=build_job_metrics(job),
+        )
+    return True
+
+
 def build_notice(job):
     if not job:
         return {"notice": "Pick sections to start a run.", "notice_level": "info"}
@@ -307,6 +380,7 @@ def init_job(selected_slugs):
     status = {slug: {"state": "queued", "message": "Queued", "started_at": None} for slug in selected_slugs}
     JOBS[job_id] = {
         "job_id": job_id,
+        "episode_id": None,
         "status": status,
         "html_ready": False,
         "review_confirmed": False,
@@ -332,6 +406,7 @@ def run_job(job_id):
     if not job:
         return
     selected = job["selected"]
+    episode_id = job.get("episode_id")
 
     def status_cb(slug, state, detail=""):
         st = job["status"].get(slug)
@@ -362,6 +437,13 @@ def run_job(job_id):
                 st["state"] = "done"
                 st["message"] = "Finished."
         save_job(job)
+        if episode_id:
+            finish_episode(
+                episode_id,
+                "success",
+                output_path=outp,
+                metrics=build_job_metrics(job),
+            )
     except Exception as e:
         job["error"] = str(e)
         for st in job["status"].values():
@@ -369,6 +451,13 @@ def run_job(job_id):
                 st["state"] = "failed"
                 st["message"] = f"Failed: {e}"
         save_job(job)
+        if episode_id:
+            finish_episode(
+                episode_id,
+                "failed",
+                error=str(e),
+                metrics=build_job_metrics(job),
+            )
 
 
 def worker_loop():
@@ -448,7 +537,7 @@ def build_review_context(job_id, *, include_preview=True):
         "email_sent_to": job.get("email_sent_to", []),
         "email_error": job.get("email_error"),
         "email_sending": job.get("email_sending", False),
-        "email_subject": job.get("email_subject", default_subject()),
+        "email_subject": normalize_subject(job.get("email_subject")),
         "resolved_recipients": resolved_recipients,
         "preview_snippet": preview_snippet,
         "download_url": download_url,
@@ -542,10 +631,22 @@ def run():
     raw_list = request.form.getlist("selected")
     selected_slugs = [canonicalize_slug(s) for s in raw_list] or parse_selected(request.form.get("selected_csv", ""))
     selected_slugs = [s for s in selected_slugs if s in TOPIC_SLUGS]
+    search_queries = parse_search_queries(request.form.get("search_queries", ""))
     if not selected_slugs:
         return render_template("fragments/topics.html", topics=TOPICS, selected=[], job_id=None, error="Select at least one section.")
 
     job_id = init_job(selected_slugs)
+    run_config = build_run_config(selected_slugs, search_queries)
+    episode_id = create_episode(
+        selected_slugs,
+        search_queries=search_queries,
+        job_id=job_id,
+        run_config=run_config,
+    )
+    JOBS[job_id]["episode_id"] = episode_id
+    JOBS[job_id]["search_queries"] = search_queries
+    JOBS[job_id]["run_config"] = run_config
+    save_job(JOBS[job_id])
     enqueue_job(job_id)
 
     job = JOBS[job_id]
@@ -570,6 +671,7 @@ def run():
 @bp.route("/status/<job_id>")
 def status_fragment(job_id):
     job = get_job_or_404(job_id)
+    maybe_abort_stalled_job(job)
     status = job["status"]
     ready = job_is_ready(job)
     progress = percent_complete(status)
@@ -633,7 +735,7 @@ def email_send(job_id):
 
     group = request.form.get("group", job.get("email_group", "all"))
     extra = request.form.get("extra_emails", job.get("email_extra", ""))
-    subject = request.form.get("subject", job.get("email_subject", default_subject())).strip() or default_subject()
+    subject = normalize_subject(request.form.get("subject", job.get("email_subject")))
     action = request.form.get("action", "send")
     confirm_send = request.form.get("confirm_send") == "on"
     allow_duplicate = request.form.get("allow_duplicate") == "on"

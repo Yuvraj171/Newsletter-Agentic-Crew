@@ -1,5 +1,5 @@
 <section class="section" id="status-section"
-  {% if job_id %}hx-get="{{ url_for('web.status_fragment', job_id=job_id) }}" hx-trigger="{{ 'load, every 3s' if not ready else 'load' }}" hx-swap="outerHTML"{% endif %}
+  {% if job_id %}hx-get="{{ url_for('web.status_fragment', job_id=job_id) }}" hx-trigger="{{ 'every 3s' if not ready else 'none' }}" hx-swap="outerHTML"{% endif %}
 >
   <h2>2. AI Specialists are working</h2>
   {% if not job_id %}
