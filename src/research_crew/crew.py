@@ -1,12 +1,33 @@
 # src/research_crew/crew.py
 from crewai import Agent, Crew, Process, Task
-from crewai.llm import LLM
 import os
 from crewai.project import CrewBase, agent, crew, task
 from crewai_tools import SerperDevTool
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from typing import List
 from research_crew.llm_factory import make_llm
+
+
+def _env_int(
+    name: str,
+    default: int,
+    *,
+    min_value: int = 0,
+    max_value: int | None = None,
+) -> int:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value < min_value:
+        return min_value
+    if max_value is not None and value > max_value:
+        return max_value
+    return value
+
 
 @CrewBase
 class ResearchCrew():
@@ -25,6 +46,9 @@ class ResearchCrew():
             temperature=0.2,
             timeout=900,
         )
+        max_retry_limit = _env_int("RESEARCH_AGENT_RETRY_LIMIT", 2, min_value=0, max_value=10)
+        max_rpm = _env_int("RESEARCH_AGENT_MAX_RPM", 12, min_value=1, max_value=120)
+        max_iter = _env_int("RESEARCH_AGENT_MAX_ITER", 12, min_value=2, max_value=40)
 
         return Agent(
             config=self.agents_config['researcher'], # type: ignore[index]
@@ -33,7 +57,9 @@ class ResearchCrew():
             cache=True,
             # Disable CrewAI's reasoning-mode for Gemini models, which can
             # produce empty/None responses with the current provider.
-            max_retry_limit=2,
+            max_retry_limit=max_retry_limit,
+            max_rpm=max_rpm,
+            max_iter=max_iter,
             llm=researcher_llm,
         )
 
@@ -47,11 +73,15 @@ class ResearchCrew():
             temperature=0.2,
             timeout=900,
         )
+        max_rpm = _env_int("WRITER_AGENT_MAX_RPM", 10, min_value=1, max_value=120)
+        max_iter = _env_int("WRITER_AGENT_MAX_ITER", 8, min_value=2, max_value=40)
 
         return Agent(
             config=self.agents_config['writer'], # type: ignore[index]
             verbose=True,
             cache=True,
+            max_rpm=max_rpm,
+            max_iter=max_iter,
             llm=writer_llm,
         )
     
@@ -65,11 +95,15 @@ class ResearchCrew():
             temperature=0.2,
             timeout=1200,
         )
+        max_rpm = _env_int("EDITOR_AGENT_MAX_RPM", 8, min_value=1, max_value=120)
+        max_iter = _env_int("EDITOR_AGENT_MAX_ITER", 8, min_value=2, max_value=40)
 
         return Agent(
             config=self.agents_config['editor'],
             verbose=True,
             cache=True,
+            max_rpm=max_rpm,
+            max_iter=max_iter,
             llm=editor_llm,
             # reasoning= True,
             # max_reasoning_attempts=1,

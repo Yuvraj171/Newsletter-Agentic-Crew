@@ -1,9 +1,14 @@
 <section class="section" id="step1">
   <h2>1. Pick sections for this edition</h2>
-  <p class="eyebrow">Tap 'Start' to kick off research & drafting.</p>
+  <p class="eyebrow">
+    Search any topic to auto-generate content from Google context. If you use search, topic chips are ignored.
+  </p>
 
   {% if error %}
-    <div class="muted" style="color:#e5534b;">{{ error }}</div>
+    <div class="muted" style="color:#e5534b; margin-bottom:8px;">{{ error }}</div>
+  {% endif %}
+  {% if planner_warning %}
+    <div class="muted" style="color:#f0b429; margin-bottom:8px;">{{ planner_warning }}</div>
   {% endif %}
 
   <form
@@ -12,6 +17,9 @@
     hx-swap="outerHTML"
   >
     <input type="hidden" name="selected" value="{{ selected|join(',') }}">
+    <input type="hidden" name="search_queries" value="{{ search_queries_text or '' }}">
+    <input type="hidden" name="search_results_json" value='{{ search_results_json|e }}'>
+    <input type="hidden" name="searched_query" value="{{ searched_query or '' }}">
     <div class="chips">
       {% for t in topics %}
         {% set is_active = t.slug in selected %}
@@ -30,30 +38,156 @@
   </form>
 
   <form
-    hx-post="{{ url_for('web.run') }}"
+    hx-post="{{ url_for('web.topics_search') }}"
     hx-target="#app-main"
     hx-swap="outerHTML"
+    style="margin-top:8px;"
   >
-    {% for slug in selected %}
-      <input type="hidden" name="selected" value="{{ slug }}">
-    {% endfor %}
-    <input type="hidden" name="selected_csv" value="{{ selected|join(',') }}">
-    <label class="input-label" for="search_queries">Search context (optional)</label>
-    <input
-      id="search_queries"
-      name="search_queries"
-      type="text"
-      class="input"
-      placeholder="copilot pricing, digital twin use cases"
-      value="{{ search_queries_text or '' }}"
-      {% if job_id %}disabled{% endif %}
-    >
-    <div class="hint">Saved as verbatim search queries in episode memory.</div>
-    <p class="muted">Select at least one section.</p>
-    <div class="cta-sticky">
-      <button class="btn btn-primary" {% if not selected or job_id %}disabled{% endif %}>
-        Start Research & Drafting
-      </button>
+    <input type="hidden" name="selected" value="{{ selected|join(',') }}">
+    <input type="hidden" name="search_queries" value="{{ search_queries_text or '' }}">
+    <input type="hidden" name="search_results_json" value='{{ search_results_json|e }}'>
+    <input type="hidden" name="searched_query" value="{{ searched_query or '' }}">
+    <input type="hidden" name="topic_scope" value="{{ topic_scope or 'static_manual' }}">
+    <label class="input-label" for="search_query">Search Topic (Auto-Generate)</label>
+    <div class="form-row" style="grid-template-columns: minmax(0, 1fr) auto;">
+      <input
+        id="search_query"
+        name="search_query"
+        type="text"
+        class="input"
+        placeholder="e.g. autonomous quality inspection"
+        value="{{ searched_query or '' }}"
+        {% if job_id %}disabled{% endif %}
+      >
+      <button class="btn" {% if job_id %}disabled{% endif %}>Search</button>
     </div>
+    <div class="hint">Runs Google search via Serper and immediately starts generation.</div>
+    {% if search_error %}
+      <div class="muted" style="color:#e5534b; margin-top:6px;">{{ search_error }}</div>
+    {% endif %}
   </form>
+
+  {% if dynamic_topics_enabled %}
+    <form
+      hx-post="{{ url_for('web.topics_propose') }}"
+      hx-target="#step1"
+      hx-swap="outerHTML"
+    >
+      <input type="hidden" name="selected" value="{{ selected|join(',') }}">
+      <input type="hidden" name="search_queries" value="{{ search_queries_text or '' }}">
+      <input type="hidden" name="search_results_json" value='{{ search_results_json|e }}'>
+      <input type="hidden" name="searched_query" value="{{ searched_query or '' }}">
+      <div class="hint">Optional fallback flow: propose topics from saved search context.</div>
+      {% if freeform_topic_slot_enabled %}
+        <div class="hint">Optional free-form slot preview: {{ freeform_preview }}</div>
+      {% endif %}
+      <div class="cta-sticky" style="margin-top:10px;">
+        <button class="btn" {% if job_id %}disabled{% endif %}>Propose Topics</button>
+      </div>
+    </form>
+
+    {% if proposals %}
+      <form
+        id="run-form"
+        hx-post="{{ url_for('web.run') }}"
+        hx-target="#app-main"
+        hx-swap="outerHTML"
+        style="margin-top:12px;"
+      >
+        <input type="hidden" name="selected_csv" value="{{ selected|join(',') }}">
+        <input type="hidden" name="search_queries" value="{{ search_queries_text or '' }}">
+        <input type="hidden" name="search_results_json" value='{{ search_results_json|e }}'>
+        <input type="hidden" name="searched_query" value="{{ searched_query or '' }}">
+        <input type="hidden" name="topic_scope" value="{{ topic_scope }}">
+        <input type="hidden" name="proposed_topics_version" value="{{ proposal_version }}">
+        <input type="hidden" name="proposed_topics_json" value='{{ proposed_topics_json|e }}'>
+        <input type="hidden" name="approved_topics_json" id="approved_topics_json" value="[]">
+
+        <div class="proposal-list">
+          {% for p in proposals %}
+            {% set pid = 'proposal_' ~ loop.index0 %}
+            <label class="proposal-card" for="{{ pid }}">
+              <input
+                id="{{ pid }}"
+                type="checkbox"
+                name="approved_topic"
+                value="{{ p.slug }}"
+                class="proposal-check"
+                data-proposal='{{ p|tojson|e }}'
+                {% if p.selected %}checked{% endif %}
+                {% if job_id %}disabled{% endif %}
+              >
+              <div class="proposal-body">
+                <div class="proposal-title-row">
+                  <div class="proposal-title">{{ p.icon }} {{ p.label }}</div>
+                  <div class="proposal-tags">
+                    <span class="pill pill-blocked">System suggested</span>
+                    <span class="pill pill-success user-picked{% if not p.selected %} hidden{% endif %}">Selected by you</span>
+                    <span class="pill pill-{{ 'success' if p.confidence == 'High' else 'blocked' if p.confidence == 'Medium' else 'failed' }}">{{ p.confidence }} confidence</span>
+                  </div>
+                </div>
+                {% if p.anchor_label %}
+                  <div class="hint">Related to {{ p.anchor_label }}</div>
+                {% endif %}
+                <div class="muted">{{ p.ui_rationale or p.rationale }}</div>
+                {% if p.type == 'freeform' %}
+                  <div class="hint">Optional free-form topic (unselected by default).</div>
+                {% endif %}
+              </div>
+            </label>
+          {% endfor %}
+        </div>
+
+        <div class="cta-sticky" style="margin-top:10px;">
+          <button class="btn btn-primary" {% if job_id %}disabled{% endif %}>Start Approved Topics</button>
+        </div>
+      </form>
+    {% else %}
+      {% if allow_manual_fallback and topic_scope == 'static_manual' %}
+        <form
+          hx-post="{{ url_for('web.run') }}"
+          hx-target="#app-main"
+          hx-swap="outerHTML"
+          style="margin-top:12px;"
+        >
+          {% for slug in selected %}
+            <input type="hidden" name="selected" value="{{ slug }}">
+          {% endfor %}
+          <input type="hidden" name="selected_csv" value="{{ selected|join(',') }}">
+          <input type="hidden" name="search_queries" value="{{ search_queries_text or '' }}">
+          <input type="hidden" name="search_results_json" value='{{ search_results_json|e }}'>
+          <input type="hidden" name="searched_query" value="{{ searched_query or '' }}">
+          <input type="hidden" name="topic_scope" value="static_manual">
+          <div class="hint">Proposal service fallback active. You can run with manual selection.</div>
+          <div class="cta-sticky" style="margin-top:10px;">
+            <button class="btn btn-primary" {% if not selected or job_id %}disabled{% endif %}>Start Manual Run</button>
+          </div>
+        </form>
+      {% else %}
+        <div class="muted" style="margin-top:10px;">No proposals yet. Click <strong>Propose Topics</strong> first.</div>
+      {% endif %}
+    {% endif %}
+  {% else %}
+    <form
+      hx-post="{{ url_for('web.run') }}"
+      hx-target="#app-main"
+      hx-swap="outerHTML"
+    >
+      {% for slug in selected %}
+        <input type="hidden" name="selected" value="{{ slug }}">
+      {% endfor %}
+      <input type="hidden" name="selected_csv" value="{{ selected|join(',') }}">
+      <input type="hidden" name="search_queries" value="{{ search_queries_text or '' }}">
+      <input type="hidden" name="search_results_json" value='{{ search_results_json|e }}'>
+      <input type="hidden" name="searched_query" value="{{ searched_query or '' }}">
+      <input type="hidden" name="topic_scope" value="static_manual">
+      <div class="hint">Manual fallback run using selected sections.</div>
+      <p class="muted">Select at least one section.</p>
+      <div class="cta-sticky">
+        <button class="btn btn-primary" {% if not selected or job_id %}disabled{% endif %}>
+          Start Research and Drafting
+        </button>
+      </div>
+    </form>
+  {% endif %}
 </section>

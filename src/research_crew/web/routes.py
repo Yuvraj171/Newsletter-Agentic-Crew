@@ -1,16 +1,38 @@
-﻿from flask import Blueprint, render_template, request, send_file, abort, url_for
+from flask import Blueprint, render_template, request, send_file, abort, url_for
 import json
 import queue
 import hashlib
 import os
 import time
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 import threading
 import uuid
+from typing import Any
 
-from research_crew.app import generate_newsletter, send_newsletter_email
+from research_crew.newsletter_service import generate_newsletter, send_newsletter_email
 from research_crew.web.db import load_job, load_latest_job, save_email_history_entry, save_job, find_duplicate_send
-from research_crew.memory.episodes import create_episode, finish_episode, build_job_metrics, find_running_episode_id
+from research_crew.memory.episodes import (
+    create_episode,
+    finish_episode,
+    build_job_metrics,
+    find_running_episode_id,
+    record_proposal_impressions,
+    record_selection_feedback,
+    record_execution_feedback,
+    record_delivery_feedback,
+    record_search_event,
+    record_search_context_feedback,
+)
+from research_crew.main import topic_definitions
+from research_crew.topic_planner import (
+    DEFAULT_TEMPLATE_PROPOSAL_COUNT,
+    build_freeform_topic_label,
+    propose_topics,
+)
 
 bp = Blueprint("web", __name__)
 
@@ -22,6 +44,8 @@ TOPICS = [
     {"slug": "tech_trends", "label": "Tech Trends", "icon": "\U0001F680"},
 ]
 TOPIC_SLUGS = {t["slug"] for t in TOPICS}
+TOPIC_BY_SLUG = {t["slug"]: t for t in TOPICS}
+TOPIC_DEF_BY_SLUG = {d["topic_slug"]: d for d in topic_definitions}
 EMAIL_GROUPS = {
     "all": [],
     "ops": [],
@@ -41,6 +65,64 @@ APP_START_TS = time.time()
 MAX_JOB_RUNTIME_SECONDS = 45 * 60
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+DYNAMIC_TOPICS_ENABLED = env_flag("DYNAMIC_TOPICS_ENABLED", False)
+FREEFORM_TOPIC_SLOT_ENABLED = env_flag("FREEFORM_TOPIC_SLOT_ENABLED", False)
+SEARCH_CONTEXT_IN_PROMPTS = env_flag("SEARCH_CONTEXT_IN_PROMPTS", True)
+MAX_TEMPLATE_PROPOSALS = env_int("DYNAMIC_TOPIC_CANDIDATES", DEFAULT_TEMPLATE_PROPOSAL_COUNT)
+AUTO_BROAD_QUERY_SECTION_CAP = 3
+
+BROAD_QUERY_MARKERS = {
+    "trend",
+    "trends",
+    "latest",
+    "news",
+    "updates",
+    "overview",
+    "landscape",
+    "future",
+    "best",
+    "top",
+    "tools",
+    "ideas",
+    "strategies",
+    "innovation",
+    "innovations",
+    "market",
+    "use cases",
+}
+
+SPECIFIC_QUERY_MARKERS = {
+    "pricing",
+    "price",
+    "cost",
+    "tutorial",
+    "how to",
+    "setup",
+    "configure",
+    "integration",
+    "compare",
+    "vs",
+    "alternative",
+}
+
+
 def canonicalize_slug(slug: str | None) -> str:
     """Normalize slugs so UI inputs (hyphen) and backend (underscore) stay aligned."""
     return (slug or "").replace("-", "_")
@@ -50,6 +132,51 @@ def parse_selected(selected_csv: str):
     parts = (selected_csv or "").split(",")
     normalized = [canonicalize_slug(p) for p in parts]
     return [slug for slug in normalized if slug in TOPIC_SLUGS]
+
+
+def parse_json_list(raw: str | None):
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def parse_search_results(raw: str | None):
+    rows = parse_json_list(raw)
+    normalized = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        link = str(row.get("link") or "").strip()
+        snippet = str(row.get("snippet") or "").strip()
+        domain = str(row.get("domain") or "").strip()
+        if not title or not link:
+            continue
+        if not domain:
+            parsed = urllib.parse.urlparse(link)
+            domain = parsed.netloc
+        normalized.append(
+            {
+                "title": title,
+                "link": link,
+                "snippet": snippet,
+                "domain": domain,
+            }
+        )
+        if len(normalized) >= 5:
+            break
+    return normalized
+
+
+def safe_int(raw: str | None, default: int = 0) -> int:
+    try:
+        return int(raw or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def parse_search_queries(raw_text: str):
@@ -63,6 +190,180 @@ def parse_search_queries(raw_text: str):
             if query:
                 queries.append(query)
     return queries
+
+
+def append_search_query(search_queries: list[str], query: str):
+    cleaned = " ".join((query or "").strip().split())
+    if not cleaned:
+        return list(search_queries or [])
+    out = list(search_queries or [])
+    existing = {q.strip().lower() for q in out}
+    if cleaned.strip().lower() not in existing:
+        out.append(cleaned)
+    return out
+
+
+def normalize_query_text(raw: str | None) -> str:
+    return " ".join(str(raw or "").strip().split())
+
+
+def infer_query_scope(query_text: str) -> str:
+    lower = normalize_query_text(query_text).lower()
+    if not lower:
+        return "single"
+
+    token_count = len(re.findall(r"[a-z0-9]+", lower))
+    has_broad_marker = any(marker in lower for marker in BROAD_QUERY_MARKERS)
+    has_specific_marker = any(marker in lower for marker in SPECIFIC_QUERY_MARKERS)
+    has_multi_intent_pattern = any(sep in lower for sep in [",", " and ", " or ", "/", "|", "&"])
+
+    if has_specific_marker and not has_broad_marker and token_count <= 10:
+        return "single"
+    if has_broad_marker:
+        return "multi"
+    if has_multi_intent_pattern and token_count >= 4:
+        return "multi"
+    if token_count >= 9 and not has_specific_marker:
+        return "multi"
+    return "single"
+
+
+def build_search_topic_plan(query_text: str, search_queries: list[str]):
+    cleaned_query = normalize_query_text(query_text)
+    scope = infer_query_scope(cleaned_query)
+    if scope == "single":
+        digest = hashlib.sha1(f"{cleaned_query}|{time.time()}".encode("utf-8")).hexdigest()[:10]
+        slug = f"search_{digest}"
+        approved_topics = [
+            {
+                "slug": slug,
+                "type": "freeform",
+                "label": cleaned_query,
+                "topic": cleaned_query,
+                "base_slug": "freeform",
+                "anchor_label": "Search Topic",
+                "icon": "*",
+                "system_suggested": True,
+            }
+        ]
+        return approved_topics, "search_auto_single", "single"
+
+    catalog = searchable_catalog([t["slug"] for t in TOPICS])
+    proposals, _planner_warning = propose_topics(
+        catalog,
+        search_queries,
+        include_freeform=False,
+        max_template_proposals=AUTO_BROAD_QUERY_SECTION_CAP,
+    )
+
+    approved_topics = []
+    for proposal in proposals[:AUTO_BROAD_QUERY_SECTION_CAP]:
+        if not isinstance(proposal, dict):
+            continue
+        slug = canonicalize_slug(str(proposal.get("slug")))
+        proposal_type = str(proposal.get("type", "dynamic_template")).strip().lower()
+        base_slug = canonicalize_slug(
+            str(proposal.get("base_slug") or proposal.get("anchor_slug") or slug.split("__", 1)[0])
+        )
+        if proposal_type == "template":
+            if slug not in TOPIC_SLUGS:
+                continue
+            base_slug = slug
+        elif proposal_type in {"dynamic_template", "template_variant"}:
+            if base_slug not in TOPIC_SLUGS:
+                continue
+        else:
+            continue
+
+        anchor = TOPIC_BY_SLUG.get(base_slug, {})
+        approved_topics.append(
+            {
+                "slug": slug,
+                "type": proposal_type,
+                "label": proposal.get("label") or proposal.get("topic") or slug.replace("_", " ").title(),
+                "topic": proposal.get("topic") or proposal.get("label") or slug.replace("_", " ").title(),
+                "base_slug": base_slug,
+                "anchor_label": proposal.get("anchor_label") or anchor.get("label"),
+                "icon": proposal.get("icon") or anchor.get("icon", "*"),
+                "rationale": proposal.get("rationale"),
+                "confidence": proposal.get("confidence"),
+                "system_suggested": True,
+            }
+        )
+
+    if approved_topics:
+        return approved_topics, "search_auto_multi", "multi"
+
+    # Safety fallback: if planner yields nothing, generate one focused free-form topic.
+    digest = hashlib.sha1(f"{cleaned_query}|{time.time()}".encode("utf-8")).hexdigest()[:10]
+    slug = f"search_{digest}"
+    fallback_topic = {
+        "slug": slug,
+        "type": "freeform",
+        "label": cleaned_query,
+        "topic": cleaned_query,
+        "base_slug": "freeform",
+        "anchor_label": "Search Topic",
+        "icon": "*",
+        "system_suggested": True,
+    }
+    return [fallback_topic], "search_auto_single", "single"
+
+
+def serper_google_search(query: str, *, top_k: int = 5, timeout_sec: float = 20.0):
+    api_key = os.getenv("SERPER_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("SERPER_API_KEY is missing.")
+
+    payload = json.dumps({"q": query, "num": max(1, min(int(top_k), 10))}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://google.serper.dev/search",
+        data=payload,
+        method="POST",
+        headers={
+            "X-API-KEY": api_key,
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Serper HTTP {exc.code}: {details[:200]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Serper connection failed: {exc.reason}") from exc
+
+    try:
+        payload_json = json.loads(body or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Serper returned invalid JSON.") from exc
+
+    organic = payload_json.get("organic")
+    if not isinstance(organic, list):
+        return []
+
+    results = []
+    for item in organic:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        link = str(item.get("link") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        if not title or not link:
+            continue
+        domain = urllib.parse.urlparse(link).netloc
+        results.append(
+            {
+                "title": title,
+                "link": link,
+                "snippet": snippet,
+                "domain": domain,
+            }
+        )
+        if len(results) >= top_k:
+            break
+    return results
 
 
 def parse_emails(csv: str):
@@ -98,13 +399,104 @@ def now_timestamp():
     return time.strftime("%Y-%m-%d %H:%M")
 
 
-def build_run_config(selected_slugs, search_queries):
+def build_run_config(selected_slugs, search_queries, *, search_results=None):
     return {
         "entrypoint": "web_ui",
         "selected_topics": list(selected_slugs or []),
         "topic_count": len(selected_slugs or []),
         "search_query_count": len(search_queries or []),
+        "search_result_count": len(search_results or []),
+        "dynamic_topics_enabled": DYNAMIC_TOPICS_ENABLED,
+        "search_context_in_prompts": SEARCH_CONTEXT_IN_PROMPTS,
     }
+
+
+def searchable_catalog(selected_slugs: list[str] | None = None):
+    allowed = set(selected_slugs or TOPIC_SLUGS)
+    catalog = []
+    for definition in topic_definitions:
+        slug = definition["topic_slug"]
+        if slug not in allowed:
+            continue
+        visual = TOPIC_BY_SLUG.get(slug, {})
+        catalog.append(
+            {
+                "slug": slug,
+                "label": visual.get("label", definition["topic"]),
+                "icon": visual.get("icon", "*"),
+                "topic": definition["topic"],
+                "research_brief": definition["research_brief"],
+            }
+        )
+    return catalog
+
+
+def selected_topic_cards(job: dict[str, Any]) -> list[dict[str, str]]:
+    approved_by_slug = {
+        canonicalize_slug(str(item.get("slug"))): item
+        for item in (job.get("approved_topics") or [])
+        if isinstance(item, dict)
+    }
+    cards = []
+    for slug in job.get("selected", []):
+        canonical = canonicalize_slug(slug)
+        visual = TOPIC_BY_SLUG.get(canonical)
+        approved = approved_by_slug.get(canonical, {})
+        if visual:
+            cards.append({"slug": canonical, "label": visual["label"], "icon": visual["icon"]})
+            continue
+        if approved:
+            cards.append(
+                {
+                    "slug": canonical,
+                    "label": str(approved.get("label") or approved.get("topic") or canonical.replace("_", " ").title()),
+                    "icon": str(approved.get("icon") or approved.get("base_icon") or "*"),
+                }
+            )
+            continue
+        cards.append({"slug": canonical, "label": canonical.replace("_", " ").title(), "icon": "*"})
+    return cards
+
+
+def render_topics_fragment(
+    *,
+    selected: list[str],
+    job_id: str | None,
+    error: str | None = None,
+    search_queries_text: str = "",
+    proposals: list[dict[str, Any]] | None = None,
+    proposal_version: int = 0,
+    planner_warning: str | None = None,
+    topic_scope: str = "static_manual",
+    allow_manual_fallback: bool = False,
+    search_results: list[dict[str, str]] | None = None,
+    search_error: str | None = None,
+    searched_query: str = "",
+):
+    safe_search_results = search_results or []
+    return render_template(
+        "fragments/topics.html",
+        topics=TOPICS,
+        selected=selected,
+        job_id=job_id,
+        error=error,
+        search_queries_text=search_queries_text,
+        dynamic_topics_enabled=DYNAMIC_TOPICS_ENABLED,
+        freeform_topic_slot_enabled=FREEFORM_TOPIC_SLOT_ENABLED,
+        proposals=proposals or [],
+        proposal_version=proposal_version,
+        proposed_topics_json=json.dumps(proposals or []),
+        planner_warning=planner_warning,
+        topic_scope=topic_scope,
+        allow_manual_fallback=allow_manual_fallback,
+        search_results=safe_search_results,
+        search_results_json=json.dumps(safe_search_results),
+        search_error=search_error,
+        searched_query=searched_query,
+        freeform_preview=build_freeform_topic_label(parse_search_queries(search_queries_text))
+        if FREEFORM_TOPIC_SLOT_ENABLED
+        else None,
+    )
 
 
 def normalize_html(html):
@@ -375,7 +767,15 @@ def add_send_history(job, status, recipients, subject, error=None, content_hash=
     return entry
 
 
-def init_job(selected_slugs):
+def init_job(
+    selected_slugs,
+    *,
+    search_queries=None,
+    search_results=None,
+    proposed_topics=None,
+    approved_topics=None,
+    topic_scope="static_manual",
+):
     job_id = uuid.uuid4().hex
     status = {slug: {"state": "queued", "message": "Queued", "started_at": None} for slug in selected_slugs}
     JOBS[job_id] = {
@@ -388,6 +788,11 @@ def init_job(selected_slugs):
         "error": None,
         "output_path": None,
         "selected": selected_slugs,
+        "search_queries": list(search_queries or []),
+        "search_results": list(search_results or []),
+        "proposed_topics": list(proposed_topics or []),
+        "approved_topics": list(approved_topics or []),
+        "topic_scope": topic_scope,
         "email_sent": False,
         "email_error": None,
         "email_sending": False,
@@ -401,11 +806,77 @@ def init_job(selected_slugs):
     return job_id
 
 
+def start_generation_job(
+    *,
+    run_selected_slugs: list[str],
+    search_queries: list[str],
+    search_results: list[dict[str, Any]] | None,
+    proposed_topics: list[dict[str, Any]] | None,
+    approved_topics: list[dict[str, Any]] | None,
+    topic_scope: str,
+    run_config_updates: dict[str, Any] | None = None,
+):
+    job_id = init_job(
+        run_selected_slugs,
+        search_queries=search_queries,
+        search_results=search_results,
+        proposed_topics=proposed_topics,
+        approved_topics=approved_topics,
+        topic_scope=topic_scope,
+    )
+    run_config = build_run_config(
+        run_selected_slugs,
+        search_queries,
+        search_results=search_results,
+    )
+    if run_config_updates:
+        run_config.update(run_config_updates)
+
+    episode_id = create_episode(
+        run_selected_slugs,
+        search_queries=search_queries,
+        job_id=job_id,
+        run_config=run_config,
+    )
+    JOBS[job_id]["episode_id"] = episode_id
+    JOBS[job_id]["search_queries"] = list(search_queries or [])
+    JOBS[job_id]["search_results"] = list(search_results or [])
+    JOBS[job_id]["proposed_topics"] = list(proposed_topics or [])
+    JOBS[job_id]["approved_topics"] = list(approved_topics or [])
+    JOBS[job_id]["topic_scope"] = topic_scope
+    JOBS[job_id]["run_config"] = run_config
+
+    record_selection_feedback(
+        job_id=job_id,
+        episode_id=episode_id,
+        proposed_topics=proposed_topics,
+        approved_topics=approved_topics,
+    )
+    record_search_context_feedback(
+        search_queries=search_queries,
+        job_id=job_id,
+        episode_id=episode_id,
+        event_type="used_in_run",
+        outcome="started",
+        metadata={
+            "topic_scope": topic_scope,
+            "approved_topics": len(approved_topics or []),
+            "search_result_count": len(search_results or []),
+        },
+    )
+    save_job(JOBS[job_id])
+    enqueue_job(job_id)
+    return job_id
+
+
 def run_job(job_id):
     job = JOBS.get(job_id)
     if not job:
         return
     selected = job["selected"]
+    approved_topics = job.get("approved_topics") or []
+    search_queries = job.get("search_queries") or []
+    search_results = job.get("search_results") or []
     episode_id = job.get("episode_id")
 
     def status_cb(slug, state, detail=""):
@@ -429,7 +900,14 @@ def run_job(job_id):
         pass
 
     try:
-        html, outp, _ = generate_newsletter(selected_slugs=selected, cb=log_cb, status_cb=status_cb)
+        html, outp, _ = generate_newsletter(
+            selected_slugs=selected,
+            selected_topics=approved_topics,
+            search_queries=search_queries,
+            search_results=search_results,
+            cb=log_cb,
+            status_cb=status_cb,
+        )
         job["html_ready"] = True
         job["output_path"] = Path(outp)
         for slug, st in job["status"].items():
@@ -438,6 +916,21 @@ def run_job(job_id):
                 st["message"] = "Finished."
         save_job(job)
         if episode_id:
+            record_execution_feedback(
+                job_id=job_id,
+                episode_id=episode_id,
+                approved_topics=approved_topics,
+                status_map=job.get("status"),
+                error=None,
+            )
+            record_search_context_feedback(
+                search_queries=search_queries,
+                job_id=job_id,
+                episode_id=episode_id,
+                event_type="run",
+                outcome="success",
+                metadata={"stage": "generation"},
+            )
             finish_episode(
                 episode_id,
                 "success",
@@ -452,6 +945,21 @@ def run_job(job_id):
                 st["message"] = f"Failed: {e}"
         save_job(job)
         if episode_id:
+            record_execution_feedback(
+                job_id=job_id,
+                episode_id=episode_id,
+                approved_topics=approved_topics,
+                status_map=job.get("status"),
+                error=str(e),
+            )
+            record_search_context_feedback(
+                search_queries=search_queries,
+                job_id=job_id,
+                episode_id=episode_id,
+                event_type="run",
+                outcome="failed",
+                metadata={"stage": "generation", "error": str(e)},
+            )
             finish_episode(
                 episode_id,
                 "failed",
@@ -515,7 +1023,8 @@ def build_review_context(job_id, *, include_preview=True):
         except Exception:
             preview_snippet = ""
 
-    topics_selected = [t for t in TOPICS if t["slug"] in job["selected"]]
+    topics_selected = selected_topic_cards(job)
+    search_queries = job.get("search_queries", [])
     notice_ctx = build_notice(job)
     email_history = job.get("email_history", [])
     last_email_attempt = email_history[-1] if email_history else None
@@ -530,6 +1039,10 @@ def build_review_context(job_id, *, include_preview=True):
         "review_confirmed": job.get("review_confirmed", False),
         "approved": job.get("approved", False),
         "error": job.get("error"),
+        "search_queries": search_queries,
+        "search_queries_text": ", ".join(search_queries),
+        "topic_scope": job.get("topic_scope", "static_manual"),
+        "approved_topics": job.get("approved_topics", []),
         "email_groups": EMAIL_GROUPS,
         "email_group": job.get("email_group", "all"),
         "email_extra": job.get("email_extra", ""),
@@ -568,6 +1081,20 @@ def home():
             ready=False,
             error=None,
             review_confirmed=False,
+            search_queries_text="",
+            search_results=[],
+            search_results_json="[]",
+            search_error=None,
+            searched_query="",
+            dynamic_topics_enabled=DYNAMIC_TOPICS_ENABLED,
+            freeform_topic_slot_enabled=FREEFORM_TOPIC_SLOT_ENABLED,
+            proposals=[],
+            proposal_version=0,
+            proposed_topics_json="[]",
+            planner_warning=None,
+            topic_scope="static_manual",
+            allow_manual_fallback=False,
+            freeform_preview=build_freeform_topic_label([]) if FREEFORM_TOPIC_SLOT_ENABLED else None,
             **notice_ctx,
         )
 
@@ -577,10 +1104,13 @@ def home():
         notice_ctx = build_notice(job)
         status = job.get("status", {})
         eta_by_slug, eta_range = compute_eta(status)
+        selected_template_slugs = [s for s in job.get("selected", []) if s in TOPIC_SLUGS]
+        proposals = job.get("proposed_topics", [])
+        proposal_version = safe_int(job.get("run_config", {}).get("proposed_topics_version") if isinstance(job.get("run_config"), dict) else 0)
         return render_template(
             "home.html",
             topics=TOPICS,
-            selected=job.get("selected", []),
+            selected=selected_template_slugs,
             job_id=job["job_id"],
             status=status,
             progress=percent_complete(status),
@@ -589,6 +1119,22 @@ def home():
             ready=job_is_ready(job),
             error=job.get("error"),
             review_confirmed=job.get("review_confirmed", False),
+            search_queries_text=", ".join(job.get("search_queries", [])),
+            search_results=[],
+            search_results_json="[]",
+            search_error=None,
+            searched_query=(job.get("search_queries") or [""])[0],
+            dynamic_topics_enabled=DYNAMIC_TOPICS_ENABLED,
+            freeform_topic_slot_enabled=FREEFORM_TOPIC_SLOT_ENABLED,
+            proposals=proposals,
+            proposal_version=proposal_version,
+            proposed_topics_json=json.dumps(proposals),
+            planner_warning=None,
+            topic_scope=job.get("topic_scope", "static_manual"),
+            allow_manual_fallback=False,
+            freeform_preview=build_freeform_topic_label(job.get("search_queries", []))
+            if FREEFORM_TOPIC_SLOT_ENABLED
+            else None,
             **notice_ctx,
         )
 
@@ -605,6 +1151,20 @@ def home():
         ready=False,
         error=None,
         review_confirmed=False,
+        search_queries_text="",
+        search_results=[],
+        search_results_json="[]",
+        search_error=None,
+        searched_query="",
+        dynamic_topics_enabled=DYNAMIC_TOPICS_ENABLED,
+        freeform_topic_slot_enabled=FREEFORM_TOPIC_SLOT_ENABLED,
+        proposals=[],
+        proposal_version=0,
+        proposed_topics_json="[]",
+        planner_warning=None,
+        topic_scope="static_manual",
+        allow_manual_fallback=False,
+        freeform_preview=build_freeform_topic_label([]) if FREEFORM_TOPIC_SLOT_ENABLED else None,
         **notice_ctx,
     )
 
@@ -613,9 +1173,22 @@ def topics_toggle():
     selected_csv = request.form.get("selected", "")
     current_slugs = parse_selected(selected_csv)
     toggled_slug = canonicalize_slug(request.form.get("toggle"))
+    search_queries_text = request.form.get("search_queries", "")
+    search_results = parse_search_results(request.form.get("search_results_json"))
+    searched_query = request.form.get("searched_query", "")
 
     if toggled_slug not in TOPIC_SLUGS:
-        return render_template("fragments/topics.html", topics=TOPICS, selected=current_slugs, job_id=None, error=None)
+        return render_topics_fragment(
+            selected=current_slugs,
+            job_id=None,
+            error=None,
+            search_queries_text=search_queries_text,
+            proposals=[],
+            proposal_version=0,
+            topic_scope="static_manual",
+            search_results=search_results,
+            searched_query=searched_query,
+        )
 
     updated_selected = current_slugs.copy()
     if toggled_slug in updated_selected:
@@ -623,31 +1196,152 @@ def topics_toggle():
     else:
         updated_selected.append(toggled_slug)
 
-    return render_template("fragments/topics.html", topics=TOPICS, selected=updated_selected, job_id=None, error=None)
-
-
-@bp.route("/run", methods=["POST"])
-def run():
-    raw_list = request.form.getlist("selected")
-    selected_slugs = [canonicalize_slug(s) for s in raw_list] or parse_selected(request.form.get("selected_csv", ""))
-    selected_slugs = [s for s in selected_slugs if s in TOPIC_SLUGS]
-    search_queries = parse_search_queries(request.form.get("search_queries", ""))
-    if not selected_slugs:
-        return render_template("fragments/topics.html", topics=TOPICS, selected=[], job_id=None, error="Select at least one section.")
-
-    job_id = init_job(selected_slugs)
-    run_config = build_run_config(selected_slugs, search_queries)
-    episode_id = create_episode(
-        selected_slugs,
-        search_queries=search_queries,
-        job_id=job_id,
-        run_config=run_config,
+    return render_topics_fragment(
+        selected=updated_selected,
+        job_id=None,
+        error=None,
+        search_queries_text=search_queries_text,
+        proposals=[],
+        proposal_version=0,
+        topic_scope="static_manual",
+        search_results=search_results,
+        searched_query=searched_query,
     )
-    JOBS[job_id]["episode_id"] = episode_id
-    JOBS[job_id]["search_queries"] = search_queries
-    JOBS[job_id]["run_config"] = run_config
-    save_job(JOBS[job_id])
-    enqueue_job(job_id)
+
+
+@bp.route("/topics/search", methods=["POST"])
+def topics_search():
+    query_text = normalize_query_text(request.form.get("search_query"))
+    search_queries = [query_text] if query_text else []
+    search_results: list[dict[str, str]] = []
+
+    if not query_text:
+        notice_ctx = build_notice(None)
+        return render_template(
+            "home.html",
+            topics=TOPICS,
+            selected=[],
+            job_id=None,
+            status={},
+            progress=0,
+            eta_by_slug={},
+            eta_range=None,
+            ready=False,
+            error="Enter a topic before searching.",
+            review_confirmed=False,
+            search_queries_text="",
+            search_results=[],
+            search_results_json="[]",
+            search_error=None,
+            searched_query="",
+            dynamic_topics_enabled=DYNAMIC_TOPICS_ENABLED,
+            freeform_topic_slot_enabled=FREEFORM_TOPIC_SLOT_ENABLED,
+            proposals=[],
+            proposal_version=0,
+            proposed_topics_json="[]",
+            planner_warning=None,
+            topic_scope="search_auto_single",
+            allow_manual_fallback=False,
+            freeform_preview=build_freeform_topic_label([]) if FREEFORM_TOPIC_SLOT_ENABLED else None,
+            **notice_ctx,
+        )
+
+    try:
+        search_results = serper_google_search(query_text, top_k=5)
+        record_search_event(
+            query_text=query_text,
+            event_type="search",
+            outcome="ok",
+            result_count=len(search_results),
+            results=search_results,
+            metadata={"source": "topics_search_bar_auto_run"},
+        )
+    except Exception as exc:
+        record_search_event(
+            query_text=query_text,
+            event_type="search",
+            outcome="error",
+            result_count=0,
+            results=[],
+            metadata={"source": "topics_search_bar_auto_run", "error": str(exc)},
+        )
+        notice_ctx = build_notice(None)
+        return render_template(
+            "home.html",
+            topics=TOPICS,
+            selected=[],
+            job_id=None,
+            status={},
+            progress=0,
+            eta_by_slug={},
+            eta_range=None,
+            ready=False,
+            error=f"Search unavailable right now: {exc}",
+            review_confirmed=False,
+            search_queries_text=query_text,
+            search_results=[],
+            search_results_json="[]",
+            search_error=None,
+            searched_query=query_text,
+            dynamic_topics_enabled=DYNAMIC_TOPICS_ENABLED,
+            freeform_topic_slot_enabled=FREEFORM_TOPIC_SLOT_ENABLED,
+            proposals=[],
+            proposal_version=0,
+            proposed_topics_json="[]",
+            planner_warning=None,
+            topic_scope="search_auto_single",
+            allow_manual_fallback=False,
+            freeform_preview=build_freeform_topic_label(search_queries) if FREEFORM_TOPIC_SLOT_ENABLED else None,
+            **notice_ctx,
+        )
+
+    approved_topics, topic_scope, query_scope = build_search_topic_plan(query_text, search_queries)
+    run_selected_slugs = [str(item.get("slug")) for item in approved_topics if isinstance(item, dict) and item.get("slug")]
+    if not run_selected_slugs:
+        notice_ctx = build_notice(None)
+        return render_template(
+            "home.html",
+            topics=TOPICS,
+            selected=[],
+            job_id=None,
+            status={},
+            progress=0,
+            eta_by_slug={},
+            eta_range=None,
+            ready=False,
+            error="Unable to build a run plan from this topic. Try a more specific query.",
+            review_confirmed=False,
+            search_queries_text=query_text,
+            search_results=[],
+            search_results_json="[]",
+            search_error=None,
+            searched_query=query_text,
+            dynamic_topics_enabled=DYNAMIC_TOPICS_ENABLED,
+            freeform_topic_slot_enabled=FREEFORM_TOPIC_SLOT_ENABLED,
+            proposals=[],
+            proposal_version=0,
+            proposed_topics_json="[]",
+            planner_warning=None,
+            topic_scope="search_auto_single",
+            allow_manual_fallback=False,
+            freeform_preview=build_freeform_topic_label(search_queries) if FREEFORM_TOPIC_SLOT_ENABLED else None,
+            **notice_ctx,
+        )
+
+    job_id = start_generation_job(
+        run_selected_slugs=run_selected_slugs,
+        search_queries=search_queries,
+        search_results=search_results,
+        proposed_topics=[],
+        approved_topics=approved_topics,
+        topic_scope=topic_scope,
+        run_config_updates={
+            "topic_scope": topic_scope,
+            "approved_topic_count": len(approved_topics),
+            "query_scope": query_scope,
+            "entrypoint": "search_auto_run",
+        },
+    )
 
     job = JOBS[job_id]
     notice_ctx = build_notice(job)
@@ -655,7 +1349,7 @@ def run():
     return render_template(
         "home.html",
         topics=TOPICS,
-        selected=selected_slugs,
+        selected=[],
         job_id=job_id,
         status=job["status"],
         progress=percent_complete(job["status"]),
@@ -664,6 +1358,291 @@ def run():
         ready=False,
         error=None,
         review_confirmed=False,
+        search_queries_text=query_text,
+        search_results=[],
+        search_results_json="[]",
+        search_error=None,
+        searched_query=query_text,
+        dynamic_topics_enabled=DYNAMIC_TOPICS_ENABLED,
+        freeform_topic_slot_enabled=FREEFORM_TOPIC_SLOT_ENABLED,
+        proposals=[],
+        proposal_version=0,
+        proposed_topics_json="[]",
+        planner_warning=None,
+        topic_scope=topic_scope,
+        allow_manual_fallback=False,
+        freeform_preview=build_freeform_topic_label(search_queries) if FREEFORM_TOPIC_SLOT_ENABLED else None,
+        **notice_ctx,
+    )
+
+
+@bp.route("/topics/propose", methods=["POST"])
+def topics_propose():
+    selected_csv = request.form.get("selected", "")
+    selected_slugs = parse_selected(selected_csv)
+    search_queries_text = request.form.get("search_queries", "")
+    search_queries = parse_search_queries(search_queries_text)
+    search_results = parse_search_results(request.form.get("search_results_json"))
+    searched_query = request.form.get("searched_query", "")
+
+    if not DYNAMIC_TOPICS_ENABLED:
+        return render_topics_fragment(
+            selected=selected_slugs,
+            job_id=None,
+            error="Dynamic topic proposals are disabled. Using manual selection.",
+            search_queries_text=search_queries_text,
+            proposals=[],
+            proposal_version=0,
+            topic_scope="static_manual",
+            search_results=search_results,
+            searched_query=searched_query,
+        )
+
+    scope_slugs = selected_slugs if selected_slugs else [t["slug"] for t in TOPICS]
+    catalog = searchable_catalog(scope_slugs)
+    if not catalog:
+        return render_topics_fragment(
+            selected=selected_slugs,
+            job_id=None,
+            error="No template topics available for proposal. Select at least one template topic.",
+            search_queries_text=search_queries_text,
+            proposals=[],
+            proposal_version=0,
+            topic_scope="dynamic_hybrid",
+            search_results=search_results,
+            searched_query=searched_query,
+        )
+
+    try:
+        proposals, planner_warning = propose_topics(
+            catalog,
+            search_queries,
+            include_freeform=FREEFORM_TOPIC_SLOT_ENABLED,
+            max_template_proposals=MAX_TEMPLATE_PROPOSALS,
+        )
+        record_proposal_impressions(
+            proposed_topics=proposals,
+            metadata={
+                "source": "topics_propose",
+                "search_query_count": len(search_queries),
+                "search_result_count": len(search_results),
+            },
+        )
+        proposal_version = int(time.time())
+        topic_scope = "dynamic_hybrid" if FREEFORM_TOPIC_SLOT_ENABLED else "dynamic_templates"
+        return render_topics_fragment(
+            selected=selected_slugs,
+            job_id=None,
+            error=None,
+            search_queries_text=search_queries_text,
+            proposals=proposals,
+            proposal_version=proposal_version,
+            planner_warning=planner_warning,
+            topic_scope=topic_scope,
+            search_results=search_results,
+            searched_query=searched_query,
+        )
+    except Exception:
+        return render_topics_fragment(
+            selected=selected_slugs,
+            job_id=None,
+            error=(
+                "Topic proposal service is temporarily unavailable. "
+                "Falling back to manual selection for this run."
+            ),
+            search_queries_text=search_queries_text,
+            proposals=[],
+            proposal_version=0,
+            topic_scope="static_manual",
+            allow_manual_fallback=True,
+            search_results=search_results,
+            searched_query=searched_query,
+        )
+
+
+@bp.route("/run", methods=["POST"])
+def run():
+    raw_list = request.form.getlist("selected")
+    selected_slugs = [canonicalize_slug(s) for s in raw_list] or parse_selected(request.form.get("selected_csv", ""))
+    selected_slugs = [s for s in selected_slugs if s in TOPIC_SLUGS]
+    search_queries_text = request.form.get("search_queries", "")
+    search_queries = parse_search_queries(search_queries_text)
+    search_results = parse_search_results(request.form.get("search_results_json"))
+    searched_query = request.form.get("searched_query", "")
+    topic_scope = request.form.get("topic_scope", "static_manual")
+    proposed_topics = parse_json_list(request.form.get("proposed_topics_json"))
+    proposed_topics_version = safe_int(request.form.get("proposed_topics_version"), 0)
+
+    approved_topics = parse_json_list(request.form.get("approved_topics_json"))
+    approved_slugs = [canonicalize_slug(s) for s in request.form.getlist("approved_topic")]
+    if not approved_topics and approved_slugs and proposed_topics:
+        proposed_by_slug = {
+            canonicalize_slug(str(item.get("slug"))): item
+            for item in proposed_topics
+            if isinstance(item, dict)
+        }
+        approved_topics = [proposed_by_slug[s] for s in approved_slugs if s in proposed_by_slug]
+
+    run_selected_slugs = selected_slugs
+    dynamic_scope_active = DYNAMIC_TOPICS_ENABLED and topic_scope != "static_manual"
+    if dynamic_scope_active:
+        if not proposed_topics or proposed_topics_version <= 0:
+            return render_topics_fragment(
+                selected=selected_slugs,
+                job_id=None,
+                error="Propose topics first, then approve at least one before running.",
+                search_queries_text=search_queries_text,
+                proposals=proposed_topics,
+                proposal_version=proposed_topics_version,
+                topic_scope=topic_scope,
+                search_results=search_results,
+                searched_query=searched_query,
+            )
+
+        if not approved_topics:
+            return render_topics_fragment(
+                selected=selected_slugs,
+                job_id=None,
+                error="Approve at least one proposed topic before running.",
+                search_queries_text=search_queries_text,
+                proposals=proposed_topics,
+                proposal_version=proposed_topics_version,
+                topic_scope=topic_scope,
+                search_results=search_results,
+                searched_query=searched_query,
+            )
+
+        proposed_by_slug = {
+            canonicalize_slug(str(item.get("slug"))): item
+            for item in proposed_topics
+            if isinstance(item, dict)
+        }
+        validated_approved = []
+        for item in approved_topics:
+            if not isinstance(item, dict):
+                continue
+            slug = canonicalize_slug(str(item.get("slug")))
+            source = proposed_by_slug.get(slug)
+            if not source:
+                continue
+            proposal_type = str(source.get("type", "dynamic_template")).strip().lower()
+            base_slug = canonicalize_slug(
+                str(source.get("base_slug") or source.get("anchor_slug") or slug.split("__", 1)[0])
+            )
+            if proposal_type == "freeform":
+                if not FREEFORM_TOPIC_SLOT_ENABLED:
+                    continue
+            elif proposal_type == "template":
+                if slug not in TOPIC_SLUGS:
+                    continue
+                base_slug = slug
+            elif proposal_type in {"dynamic_template", "template_variant"}:
+                if base_slug not in TOPIC_SLUGS:
+                    continue
+            else:
+                continue
+            anchor = TOPIC_BY_SLUG.get(base_slug, {})
+            validated_approved.append(
+                {
+                    "slug": slug,
+                    "type": proposal_type,
+                    "label": source.get("label") or source.get("topic") or slug.replace("_", " ").title(),
+                    "topic": source.get("topic") or source.get("label") or slug.replace("_", " ").title(),
+                    "base_slug": base_slug,
+                    "anchor_label": source.get("anchor_label") or anchor.get("label"),
+                    "icon": source.get("icon") or anchor.get("icon", "*"),
+                    "rationale": source.get("rationale"),
+                    "confidence": source.get("confidence"),
+                    "system_suggested": bool(source.get("system_suggested", True)),
+                }
+            )
+        approved_topics = validated_approved
+        run_selected_slugs = [item["slug"] for item in approved_topics]
+        if not run_selected_slugs:
+            return render_topics_fragment(
+                selected=selected_slugs,
+                job_id=None,
+                error="No valid approved topics found. Re-propose topics and try again.",
+                search_queries_text=search_queries_text,
+                proposals=proposed_topics,
+                proposal_version=proposed_topics_version,
+                topic_scope=topic_scope,
+                search_results=search_results,
+                searched_query=searched_query,
+            )
+    else:
+        proposed_topics = []
+        proposed_topics_version = 0
+        approved_topics = [
+            {
+                "slug": slug,
+                "type": "template",
+                "label": TOPIC_BY_SLUG[slug]["label"],
+                "topic": TOPIC_DEF_BY_SLUG.get(slug, {}).get("topic", TOPIC_BY_SLUG[slug]["label"]),
+                "base_slug": slug,
+                "anchor_label": TOPIC_BY_SLUG[slug]["label"],
+                "icon": TOPIC_BY_SLUG[slug]["icon"],
+                "system_suggested": False,
+            }
+            for slug in selected_slugs
+        ]
+
+    if not run_selected_slugs:
+        return render_topics_fragment(
+            selected=selected_slugs,
+            job_id=None,
+            error="Select at least one section.",
+            search_queries_text=search_queries_text,
+            proposals=proposed_topics,
+            proposal_version=proposed_topics_version,
+            topic_scope=topic_scope,
+            search_results=search_results,
+            searched_query=searched_query,
+        )
+
+    job_id = start_generation_job(
+        run_selected_slugs=run_selected_slugs,
+        search_queries=search_queries,
+        search_results=search_results,
+        proposed_topics=proposed_topics,
+        approved_topics=approved_topics,
+        topic_scope=topic_scope,
+        run_config_updates={
+            "proposed_topics_version": proposed_topics_version,
+            "topic_scope": topic_scope,
+            "approved_topic_count": len(approved_topics),
+        },
+    )
+
+    job = JOBS[job_id]
+    notice_ctx = build_notice(job)
+    eta_by_slug, eta_range = compute_eta(job["status"])
+    return render_template(
+        "home.html",
+        topics=TOPICS,
+        selected=[s for s in run_selected_slugs if s in TOPIC_SLUGS],
+        job_id=job_id,
+        status=job["status"],
+        progress=percent_complete(job["status"]),
+        eta_by_slug=eta_by_slug,
+        eta_range=eta_range,
+        ready=False,
+        error=None,
+        review_confirmed=False,
+        search_queries_text=search_queries_text,
+        search_results=[],
+        search_results_json="[]",
+        search_error=None,
+        searched_query=(search_queries[0] if search_queries else ""),
+        dynamic_topics_enabled=DYNAMIC_TOPICS_ENABLED,
+        freeform_topic_slot_enabled=FREEFORM_TOPIC_SLOT_ENABLED,
+        proposals=proposed_topics,
+        proposal_version=proposed_topics_version,
+        proposed_topics_json=json.dumps(proposed_topics),
+        planner_warning=None,
+        topic_scope=topic_scope,
+        allow_manual_fallback=False,
+        freeform_preview=build_freeform_topic_label(search_queries) if FREEFORM_TOPIC_SLOT_ENABLED else None,
         **notice_ctx,
     )
 
@@ -676,7 +1655,7 @@ def status_fragment(job_id):
     ready = job_is_ready(job)
     progress = percent_complete(status)
     eta_by_slug, eta_range = compute_eta(status)
-    topics_selected = [t for t in TOPICS if t["slug"] in job["selected"]]
+    topics_selected = selected_topic_cards(job)
     notice_ctx = build_notice(job)
     return render_template(
         "fragments/status.html",
@@ -688,6 +1667,8 @@ def status_fragment(job_id):
         ready=ready,
         job_id=job_id,
         error=job["error"],
+        search_queries=job.get("search_queries", []),
+        search_queries_text=", ".join(job.get("search_queries", [])),
         notice_oob=True,
         **notice_ctx,
     )
@@ -790,6 +1771,20 @@ def email_send(job_id):
             error=job["email_error"],
             content_hash=content_hash,
         )
+        record_delivery_feedback(
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            approved_topics=job.get("approved_topics"),
+            delivery_status="blocked",
+        )
+        record_search_context_feedback(
+            search_queries=job.get("search_queries"),
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            event_type="delivery",
+            outcome="send_blocked",
+            metadata={"reason": "no_recipients"},
+        )
         ctx = build_review_context(job_id, include_preview=False)
         ctx["notice_oob"] = True
         return render_template("fragments/email_section.html", **ctx)
@@ -805,6 +1800,20 @@ def email_send(job_id):
             error=job["email_error"],
             content_hash=content_hash,
         )
+        record_delivery_feedback(
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            approved_topics=job.get("approved_topics"),
+            delivery_status="blocked",
+        )
+        record_search_context_feedback(
+            search_queries=job.get("search_queries"),
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            event_type="delivery",
+            outcome="send_blocked",
+            metadata={"reason": "confirm_missing"},
+        )
         ctx = build_review_context(job_id, include_preview=False)
         ctx["notice_oob"] = True
         return render_template("fragments/email_section.html", **ctx)
@@ -819,6 +1828,20 @@ def email_send(job_id):
             subject,
             error=job["email_error"],
             content_hash=content_hash,
+        )
+        record_delivery_feedback(
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            approved_topics=job.get("approved_topics"),
+            delivery_status="blocked",
+        )
+        record_search_context_feedback(
+            search_queries=job.get("search_queries"),
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            event_type="delivery",
+            outcome="send_blocked",
+            metadata={"reason": "duplicate_blocked"},
         )
         ctx = build_review_context(job_id, include_preview=False)
         ctx["notice_oob"] = True
@@ -838,6 +1861,20 @@ def email_send(job_id):
             subject,
             content_hash=content_hash,
         )
+        record_delivery_feedback(
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            approved_topics=job.get("approved_topics"),
+            delivery_status="success",
+        )
+        record_search_context_feedback(
+            search_queries=job.get("search_queries"),
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            event_type="delivery",
+            outcome="sent",
+            metadata={"recipient_count": len(recipients)},
+        )
     except Exception as e:
         job["email_error"] = str(e)
         add_send_history(
@@ -847,6 +1884,20 @@ def email_send(job_id):
             subject,
             error=job["email_error"],
             content_hash=content_hash,
+        )
+        record_delivery_feedback(
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            approved_topics=job.get("approved_topics"),
+            delivery_status="failed",
+        )
+        record_search_context_feedback(
+            search_queries=job.get("search_queries"),
+            job_id=job_id,
+            episode_id=job.get("episode_id"),
+            event_type="delivery",
+            outcome="send_failed",
+            metadata={"error": str(e)},
         )
     finally:
         job["email_sending"] = False

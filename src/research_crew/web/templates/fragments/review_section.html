@@ -47,6 +47,17 @@
     <div class="review-actions">
       <div class="eyebrow">Action</div>
       <div class="section" style="padding:14px;">
+        {% if approved_topics %}
+          <div class="eyebrow" style="margin-bottom:6px;">Topics selected by you</div>
+          <div class="proposal-tags" style="margin-bottom:10px;">
+            {% for topic in approved_topics %}
+              <span class="pill pill-success">{{ topic.label or topic.topic or topic.slug }}</span>
+            {% endfor %}
+          </div>
+        {% endif %}
+        {% if search_queries %}
+          <div class="hint" style="margin-bottom:8px;">Search context used: {{ search_queries|join(', ') }}</div>
+        {% endif %}
         {% if not job_id %}
           <div class="muted" style="margin-bottom:12px;">Start a run to unlock review actions.</div>
         {% elif error %}

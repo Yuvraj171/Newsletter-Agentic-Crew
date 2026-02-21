@@ -54,6 +54,58 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_events (
+                event_id TEXT PRIMARY KEY,
+                episode_id TEXT,
+                job_id TEXT,
+                created_at REAL,
+                topic_slug TEXT,
+                base_slug TEXT,
+                topic_label TEXT,
+                event_type TEXT,
+                outcome TEXT,
+                score REAL,
+                metadata_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_topic_events_created ON topic_events(created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_topic_events_topic ON topic_events(topic_slug, base_slug)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_topic_events_job ON topic_events(job_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS search_events (
+                event_id TEXT PRIMARY KEY,
+                episode_id TEXT,
+                job_id TEXT,
+                created_at REAL,
+                query_text TEXT,
+                normalized_query TEXT,
+                event_type TEXT,
+                outcome TEXT,
+                result_count INTEGER,
+                results_json TEXT,
+                metadata_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_search_events_created ON search_events(created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_search_events_query ON search_events(normalized_query)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_search_events_job ON search_events(job_id)"
+        )
 
 
 def _dumps(value):

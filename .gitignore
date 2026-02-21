@@ -7,3 +7,8 @@ artifacts/
 __pycache__/
 **/__pycache__/
 *.pyc
+*.db-journal
+tmp_*.db
+tmp_*.db-journal
+instance/tmp_*.db
+instance/tmp_*.db-journal

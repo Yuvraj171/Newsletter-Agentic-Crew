@@ -266,3 +266,56 @@ This project works around it by patching CrewAI’s helper `get_llm_response` **
   - Only if that second call is also empty should the function raise the same error.
 
 Because this lives under `.venv`, if you recreate the environment or upgrade CrewAI you may need to re-apply this patch whenever you start seeing this specific error again.
+
+---
+
+## 12) Gemini 429 / RESOURCE_EXHAUSTED Mitigation
+
+If you see intermittent `429 RESOURCE_EXHAUSTED` errors even when dashboard quota looks low, use request-level backoff + pacing:
+
+```
+# Gemini HTTP retry/backoff (enabled by default in llm_factory)
+GEMINI_HTTP_RETRY_ENABLED=true
+GEMINI_HTTP_RETRY_ATTEMPTS=5
+GEMINI_HTTP_RETRY_INITIAL_DELAY=1.0
+GEMINI_HTTP_RETRY_MAX_DELAY=30.0
+GEMINI_HTTP_RETRY_EXP_BASE=2.0
+GEMINI_HTTP_RETRY_JITTER=1.0
+GEMINI_HTTP_TIMEOUT_MS=900000
+
+# Agent pacing to reduce burst traffic
+RESEARCH_AGENT_MAX_RPM=12
+RESEARCH_AGENT_MAX_ITER=12
+RESEARCH_AGENT_RETRY_LIMIT=2
+WRITER_AGENT_MAX_RPM=10
+WRITER_AGENT_MAX_ITER=8
+EDITOR_AGENT_MAX_RPM=8
+EDITOR_AGENT_MAX_ITER=8
+```
+
+Also rotate keys if any secret was exposed (`GEMINI_API_KEY`, `SERPER_API_KEY`, `GMAIL_APP_PASSWORD`) to avoid external traffic consuming your limits.
+
+---
+
+## 13) Dynamic Topic Generation (Hybrid)
+
+The web app now supports a hybrid flow where the system proposes topics, and you explicitly approve what runs.
+
+Feature flags (set in `.env`):
+
+```
+DYNAMIC_TOPICS_ENABLED=true|false
+FREEFORM_TOPIC_SLOT_ENABLED=true|false
+SEARCH_CONTEXT_IN_PROMPTS=true|false
+DYNAMIC_TOPIC_CANDIDATES=5
+```
+
+Behavior:
+- `DYNAMIC_TOPICS_ENABLED=false`: existing static/manual selection flow remains unchanged.
+- `DYNAMIC_TOPICS_ENABLED=true`: use **Propose Topics** first, then approve at least one proposal before run.
+- `FREEFORM_TOPIC_SLOT_ENABLED=true`: adds one optional free-form proposal (unselected by default).
+- `SEARCH_CONTEXT_IN_PROMPTS=true`: injects user search context into research prompts and run metadata.
+
+Run-contract additions:
+- `POST /run` now accepts `approved_topics_json` and `proposed_topics_version`.
+- Job persistence stores `search_queries_json`, `proposed_topics_json`, `approved_topics_json`, and `topic_scope`.

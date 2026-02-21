@@ -6,6 +6,11 @@
     <div class="muted">Start a run to see live status.</div>
   {% else %}
     <div class="eyebrow">Live progress</div>
+    {% if search_queries %}
+      <div class="hint" style="margin-bottom:8px;">
+        Search context in use: {{ search_queries|join(', ') }}
+      </div>
+    {% endif %}
     <div class="progress-wrap">
       <div class="progress-bar">
         <span style="width: {{ progress }}%;"></span>

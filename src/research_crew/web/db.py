@@ -24,6 +24,10 @@ def init_db():
                 updated_at REAL,
                 status_json TEXT,
                 selected_json TEXT,
+                search_queries_json TEXT,
+                proposed_topics_json TEXT,
+                approved_topics_json TEXT,
+                topic_scope TEXT,
                 html_ready INTEGER,
                 review_confirmed INTEGER,
                 approved INTEGER,
@@ -61,7 +65,13 @@ def init_db():
         ensure_columns(
             conn,
             "jobs",
-            {"email_preview_json": "TEXT"},
+            {
+                "email_preview_json": "TEXT",
+                "search_queries_json": "TEXT",
+                "proposed_topics_json": "TEXT",
+                "approved_topics_json": "TEXT",
+                "topic_scope": "TEXT",
+            },
         )
         ensure_columns(
             conn,
@@ -100,6 +110,10 @@ def save_job(job):
         job["updated_at"],
         json.dumps(job.get("status", {})),
         json.dumps(job.get("selected", [])),
+        json.dumps(job.get("search_queries", [])),
+        json.dumps(job.get("proposed_topics", [])),
+        json.dumps(job.get("approved_topics", [])),
+        job.get("topic_scope"),
         1 if job.get("html_ready") else 0,
         1 if job.get("review_confirmed") else 0,
         1 if job.get("approved") else 0,
@@ -118,15 +132,20 @@ def save_job(job):
         conn.execute(
             """
             INSERT INTO jobs (
-                job_id, created_at, updated_at, status_json, selected_json,
+                job_id, created_at, updated_at, status_json, selected_json, search_queries_json,
+                proposed_topics_json, approved_topics_json, topic_scope,
                 html_ready, review_confirmed, approved, error, output_path,
                 email_group, email_extra, email_subject, email_sent, email_error,
                 email_sending, email_sent_to_json, email_preview_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 updated_at=excluded.updated_at,
                 status_json=excluded.status_json,
                 selected_json=excluded.selected_json,
+                search_queries_json=excluded.search_queries_json,
+                proposed_topics_json=excluded.proposed_topics_json,
+                approved_topics_json=excluded.approved_topics_json,
+                topic_scope=excluded.topic_scope,
                 html_ready=excluded.html_ready,
                 review_confirmed=excluded.review_confirmed,
                 approved=excluded.approved,
@@ -209,6 +228,10 @@ def load_job(job_id):
         "updated_at": row["updated_at"],
         "status": _loads(row["status_json"], {}),
         "selected": _loads(row["selected_json"], []),
+        "search_queries": _loads(row["search_queries_json"], []),
+        "proposed_topics": _loads(row["proposed_topics_json"], []),
+        "approved_topics": _loads(row["approved_topics_json"], []),
+        "topic_scope": row["topic_scope"] or "static",
         "html_ready": _as_bool(row["html_ready"]),
         "review_confirmed": _as_bool(row["review_confirmed"]),
         "approved": _as_bool(row["approved"]),
